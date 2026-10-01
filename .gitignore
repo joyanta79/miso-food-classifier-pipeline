@@ -36,5 +36,8 @@ tests/real_data/
 *.bmp
 *.webp
 
+# Local editor / agent settings (machine-specific, not project files)
+.kiro/
+
 # OS
 .DS_Store
