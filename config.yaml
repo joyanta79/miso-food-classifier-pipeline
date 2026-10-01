@@ -1,0 +1,67 @@
+aws:
+  region: us-west-2
+  account_id: "<replace-with-account-id>"
+  sagemaker_role_arn: "<replace-with-sagemaker-role-arn>"
+s3:
+  training_bucket: "<replace-training-bucket>"
+  model_artifacts_bucket: "<replace-model-artifacts-bucket>"
+  pipeline_artifacts_bucket: "<replace-pipeline-artifacts-bucket>"
+  raw_archive_bucket: "<replace-raw-archive-bucket>"
+brands:
+  - id: white-castle
+    naming_pattern: "wc_*"
+    model_package_group: FoodClassifier-WhiteCastle
+  - id: brand-b
+    naming_pattern: "bb_*"
+    model_package_group: FoodClassifier-BrandB
+  - id: brand-c
+    naming_pattern: "bc_*"
+    model_package_group: FoodClassifier-BrandC
+  - id: brand-d
+    naming_pattern: "bd_*"
+    model_package_group: FoodClassifier-BrandD
+  - id: brand-e
+    naming_pattern: "be_*"
+    model_package_group: FoodClassifier-BrandE
+data_selection:
+  recency_months: 6
+  min_images_per_class: 500
+  target_dataset_min: 6000
+  target_dataset_max: 50000
+embedding:
+  backbone_source: imagenet
+  backbone_model_path: "<replace-with-prior-production-backbone-path>"
+  embedding_dim: 1280
+  cosine_dedup_threshold: 0.99
+kfold:
+  n_folds: 5
+  classifier: xgboost
+cleanlab:
+  flag_threshold_fraction: 0.05
+training:
+  instance_type: ml.g4dn.xlarge
+  processing_instance_type: ml.m5.xlarge
+  use_spot: true
+  epochs: 50
+  batch_size: 32
+  learning_rate: 0.001
+  checkpoint_every_epochs: 5
+  image_size: 224
+evaluation:
+  accuracy_threshold: 0.97
+  fp_rate_emergency_threshold: 0.05
+  latency_budget_ms: 1000
+drift:
+  confidence_baseline: 0.85
+  level1_confidence_floor: 0.65
+  level2_confidence_threshold: 0.70
+  correction_rate_multiplier: 3
+notifications:
+  review_topic_arn: "<replace-with-review-sns-topic-arn>"
+  ml_lead_topic_arn: "<replace-with-ml-lead-sns-topic-arn>"
+  vp_engineering_topic_arn: "<replace-with-vp-engineering-sns-topic-arn>"
+local_mode:
+  enabled: true
+  mock_aws: true
+  use_imagenet_weights: false
+  seed: 2026

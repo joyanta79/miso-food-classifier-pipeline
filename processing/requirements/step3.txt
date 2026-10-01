@@ -1,0 +1,2 @@
+numpy==1.26.4
+cleanlab==2.6.4

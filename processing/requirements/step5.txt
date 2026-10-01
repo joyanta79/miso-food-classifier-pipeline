@@ -1,0 +1,3 @@
+boto3==1.34.162
+sagemaker==2.224.3
+PyYAML==6.0.2

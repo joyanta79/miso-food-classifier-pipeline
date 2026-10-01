@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Terraform
+infra/.terraform/
+infra/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+
+# Local run outputs / scratch
+*.npy
+!tests/**/*.npy
+local_run/
+scratch/
+*.log
+
+# Image data (do not commit raw datasets / sample images)
+tests/real_data/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.webp
+
+# OS
+.DS_Store
