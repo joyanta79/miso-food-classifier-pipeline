@@ -80,8 +80,9 @@ resource "aws_sagemaker_model_package_group" "brand" {
 resource "aws_sagemaker_pipeline" "brand" {
   for_each = local.brands
 
-  pipeline_name = "${var.pipeline_name_prefix}-${each.key}"
-  role_arn      = local.effective_role_arn
+  pipeline_name         = "${var.pipeline_name_prefix}-${each.key}"
+  pipeline_display_name = "${var.pipeline_name_prefix}-${each.key}"
+  role_arn              = local.effective_role_arn
   pipeline_definition = replace(
     replace(
       local.base_pipeline_definition,
