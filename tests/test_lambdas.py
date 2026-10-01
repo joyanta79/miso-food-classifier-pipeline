@@ -82,7 +82,11 @@ def test_s3_eventbridge_shape_ignores_unknown_brand(config: dict[str, Any]) -> N
         config=config,
     )
 
-    assert result == {"accepted": 0, "failed": 0, "message": "No configured brand matched the upload."}
+    assert result == {
+        "accepted": 0,
+        "failed": 0,
+        "message": "No configured brand matched the upload.",
+    }
 
 
 def test_eventbridge_trigger_starts_brand_pipeline(config: dict[str, Any]) -> None:

@@ -8,6 +8,7 @@ CleanLab detection can be demonstrated.
 Usage:
     python scripts/run_local_e2e.py --image-dir tests/real_data/french_fries
 """
+
 from __future__ import annotations
 
 import argparse
@@ -65,7 +66,7 @@ def main() -> int:
         inventory,
         naming_pattern="wc_*",
         recency_months=6,
-        min_images_per_class=1,   # smoke bounds for a small real dataset
+        min_images_per_class=1,  # smoke bounds for a small real dataset
         target_dataset_min=1,
         target_dataset_max=50000,
     )
@@ -95,17 +96,23 @@ def main() -> int:
     flagged, cleaned, report = filter_label_issues(
         probabilities, mapping, classes, flag_threshold_fraction=0.05
     )
-    print(f"[step3] flagged={report['flagged_images']} / {report['total_images']} "
-          f"(fraction={report['flagged_fraction']:.3f}); cleaned={len(cleaned)}")
+    print(
+        f"[step3] flagged={report['flagged_images']} / {report['total_images']} "
+        f"(fraction={report['flagged_fraction']:.3f}); cleaned={len(cleaned)}"
+    )
 
     flagged_ids = {f["id"] for f in flagged}
     caught = [c for c in corrupted if c in flagged_ids]
     recall = len(caught) / len(corrupted) if corrupted else 1.0
-    print(f"[step3] CleanLab caught {len(caught)}/{len(corrupted)} injected mislabels "
-          f"(recall={recall:.0%})")
+    print(
+        f"[step3] CleanLab caught {len(caught)}/{len(corrupted)} injected mislabels "
+        f"(recall={recall:.0%})"
+    )
     for f in flagged:
-        print(f"        - {f['id']}: labeled={f['label']} predicted={f['predicted_label']} "
-              f"reason={f['reason']} conf={f['confidence']:.2f}")
+        print(
+            f"        - {f['id']}: labeled={f['label']} predicted={f['predicted_label']} "
+            f"reason={f['reason']} conf={f['confidence']:.2f}"
+        )
 
     result = {
         "images": len(manifest),

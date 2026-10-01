@@ -20,7 +20,10 @@ def test_evaluate_calculates_done_when_not_done_fp_rate_and_fails_gate():
     assert report["metrics"]["accuracy"] == 0.75
     assert report["metrics"]["done_when_not_done_fp_rate"] == 0.5
     assert report["quality_gate"] == "failed"
-    assert report["model_metrics"]["classification_metrics"]["done_when_not_done_fp_rate"]["value"] == 0.5
+    assert (
+        report["model_metrics"]["classification_metrics"]["done_when_not_done_fp_rate"]["value"]
+        == 0.5
+    )
 
 
 def test_main_writes_sagemaker_evaluation_report(tmp_path: Path, monkeypatch):

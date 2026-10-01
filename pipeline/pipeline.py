@@ -257,7 +257,10 @@ def _processing_step(
         "Arguments": {
             "RoleArn": _ref("SageMakerRoleArn"),
             "AppSpecification": {
-                "ImageUri": "683313688378.dkr.ecr.us-west-2.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3",
+                "ImageUri": (
+                    "683313688378.dkr.ecr.us-west-2.amazonaws.com/"
+                    "sagemaker-scikit-learn:1.2-1-cpu-py3"
+                ),
                 "ContainerEntrypoint": ["python3", f"/opt/ml/processing/input/code/{code_name}"],
             },
             "ProcessingResources": {
@@ -337,7 +340,13 @@ def build_dry_run_definition(
             ("TARGET_DATASET_MAX", "TargetDatasetMax"),
             ("SEED", "Seed"),
         ),
-        [{"PropertyFileName": "SelectionMetrics", "OutputName": "selection-metrics", "Path": "metrics.json"}],
+        [
+            {
+                "PropertyFileName": "SelectionMetrics",
+                "OutputName": "selection-metrics",
+                "Path": "metrics.json",
+            }
+        ],
     )
 
     embed_and_deduplicate = _processing_step(
@@ -412,7 +421,13 @@ def build_dry_run_definition(
             ("CLEANLAB_FLAG_THRESHOLD_FRACTION", "CleanlabFlagThresholdFraction"),
             ("SEED", "Seed"),
         ),
-        [{"PropertyFileName": "QualityMetrics", "OutputName": "quality-metrics", "Path": "metrics.json"}],
+        [
+            {
+                "PropertyFileName": "QualityMetrics",
+                "OutputName": "quality-metrics",
+                "Path": "metrics.json",
+            }
+        ],
     )
 
     detect_drift = _processing_step(
@@ -445,7 +460,13 @@ def build_dry_run_definition(
             ("LEVEL2_CONFIDENCE_THRESHOLD", "Level2ConfidenceThreshold"),
             ("CORRECTION_RATE_MULTIPLIER", "CorrectionRateMultiplier"),
         ),
-        [{"PropertyFileName": "DriftMetrics", "OutputName": "drift-metrics", "Path": "metrics.json"}],
+        [
+            {
+                "PropertyFileName": "DriftMetrics",
+                "OutputName": "drift-metrics",
+                "Path": "metrics.json",
+            }
+        ],
     )
 
     train_model = {
@@ -531,7 +552,13 @@ def build_dry_run_definition(
             ("FP_RATE_EMERGENCY_THRESHOLD", "FpRateEmergencyThreshold"),
             ("LATENCY_BUDGET_MS", "LatencyBudgetMs"),
         ),
-        [{"PropertyFileName": "EvaluationMetrics", "OutputName": "evaluation-metrics", "Path": "metrics.json"}],
+        [
+            {
+                "PropertyFileName": "EvaluationMetrics",
+                "OutputName": "evaluation-metrics",
+                "Path": "metrics.json",
+            }
+        ],
     )
 
     register_model = {
@@ -544,7 +571,9 @@ def build_dry_run_definition(
                 "Containers": [
                     {
                         "Image": "433757028032.dkr.ecr.us-west-2.amazonaws.com/xgboost:1.7-1",
-                        "ModelDataUrl": {"Get": "Steps.TrainBrandClassifier.ModelArtifacts.S3ModelArtifacts"},
+                        "ModelDataUrl": {
+                            "Get": "Steps.TrainBrandClassifier.ModelArtifacts.S3ModelArtifacts"
+                        },
                     }
                 ],
                 "SupportedContentTypes": ["application/json"],
@@ -556,7 +585,9 @@ def build_dry_run_definition(
                 "ModelQuality": {
                     "Statistics": {
                         "ContentType": "application/json",
-                        "S3Uri": _s3_uri("PipelineArtifactsBucket", brand.id, "evaluation", "metrics.json"),
+                        "S3Uri": _s3_uri(
+                            "PipelineArtifactsBucket", brand.id, "evaluation", "metrics.json"
+                        ),
                     }
                 }
             },
@@ -572,22 +603,32 @@ def build_dry_run_definition(
     fail_dataset = {
         "Name": "FailDatasetBounds",
         "Type": "Fail",
-        "Arguments": {"ErrorMessage": "Selected dataset is outside configured size or class-coverage bounds."},
+        "Arguments": {
+            "ErrorMessage": "Selected dataset is outside configured size or class-coverage bounds."
+        },
     }
     fail_cleanlab = {
         "Name": "FailCleanlabQuality",
         "Type": "Fail",
-        "Arguments": {"ErrorMessage": "Cleanlab flagged label fraction exceeds the configured threshold."},
+        "Arguments": {
+            "ErrorMessage": "Cleanlab flagged label fraction exceeds the configured threshold."
+        },
     }
     fail_drift = {
         "Name": "FailDriftGate",
         "Type": "Fail",
-        "Arguments": {"ErrorMessage": "Drift metrics exceed the configured confidence or correction-rate limits."},
+        "Arguments": {
+            "ErrorMessage": (
+                "Drift metrics exceed the configured confidence or correction-rate limits."
+            )
+        },
     }
     fail_evaluation = {
         "Name": "FailEvaluationGate",
         "Type": "Fail",
-        "Arguments": {"ErrorMessage": "Accuracy, emergency false-positive rate, or latency gate failed."},
+        "Arguments": {
+            "ErrorMessage": "Accuracy, emergency false-positive rate, or latency gate failed."
+        },
     }
 
     evaluation_gate = {
@@ -602,7 +643,9 @@ def build_dry_run_definition(
                 },
                 {
                     "Type": "ConditionLessThanOrEqualTo",
-                    "LeftValue": _step_ref("EvaluateModel", "EvaluationMetrics", "emergency_false_positive_rate"),
+                    "LeftValue": _step_ref(
+                        "EvaluateModel", "EvaluationMetrics", "emergency_false_positive_rate"
+                    ),
                     "RightValue": _ref("FpRateEmergencyThreshold"),
                 },
                 {
@@ -627,7 +670,9 @@ def build_dry_run_definition(
                 },
                 {
                     "Type": "ConditionLessThanOrEqualTo",
-                    "LeftValue": _step_ref("DetectDrift", "DriftMetrics", "correction_rate_multiplier"),
+                    "LeftValue": _step_ref(
+                        "DetectDrift", "DriftMetrics", "correction_rate_multiplier"
+                    ),
                     "RightValue": _ref("CorrectionRateMultiplier"),
                 },
             ],
@@ -642,7 +687,9 @@ def build_dry_run_definition(
             "Conditions": [
                 {
                     "Type": "ConditionLessThanOrEqualTo",
-                    "LeftValue": _step_ref("KFoldCleanlabQuality", "QualityMetrics", "flagged_fraction"),
+                    "LeftValue": _step_ref(
+                        "KFoldCleanlabQuality", "QualityMetrics", "flagged_fraction"
+                    ),
                     "RightValue": _ref("CleanlabFlagThresholdFraction"),
                 }
             ],
@@ -657,17 +704,23 @@ def build_dry_run_definition(
             "Conditions": [
                 {
                     "Type": "ConditionGreaterThanOrEqualTo",
-                    "LeftValue": _step_ref("SelectRecentBrandData", "SelectionMetrics", "dataset_size"),
+                    "LeftValue": _step_ref(
+                        "SelectRecentBrandData", "SelectionMetrics", "dataset_size"
+                    ),
                     "RightValue": _ref("TargetDatasetMin"),
                 },
                 {
                     "Type": "ConditionLessThanOrEqualTo",
-                    "LeftValue": _step_ref("SelectRecentBrandData", "SelectionMetrics", "dataset_size"),
+                    "LeftValue": _step_ref(
+                        "SelectRecentBrandData", "SelectionMetrics", "dataset_size"
+                    ),
                     "RightValue": _ref("TargetDatasetMax"),
                 },
                 {
                     "Type": "ConditionGreaterThanOrEqualTo",
-                    "LeftValue": _step_ref("SelectRecentBrandData", "SelectionMetrics", "minimum_class_count"),
+                    "LeftValue": _step_ref(
+                        "SelectRecentBrandData", "SelectionMetrics", "minimum_class_count"
+                    ),
                     "RightValue": _ref("MinImagesPerClass"),
                 },
             ],
@@ -720,11 +773,13 @@ def _regionalize_dlc_uris(definition: dict[str, Any], region: str) -> dict[str, 
     payload = json.dumps(definition)
     payload = payload.replace(
         f"683313688378.dkr.ecr.{_DEFAULT_DLC_REGION}.amazonaws.com/sagemaker-scikit-learn",
-        f"{_SKLEARN_DLC_ACCOUNTS.get(region, '683313688378')}.dkr.ecr.{region}.amazonaws.com/sagemaker-scikit-learn",
+        f"{_SKLEARN_DLC_ACCOUNTS.get(region, '683313688378')}.dkr.ecr."
+        f"{region}.amazonaws.com/sagemaker-scikit-learn",
     )
     payload = payload.replace(
         f"433757028032.dkr.ecr.{_DEFAULT_DLC_REGION}.amazonaws.com/xgboost",
-        f"{_XGBOOST_DLC_ACCOUNTS.get(region, '433757028032')}.dkr.ecr.{region}.amazonaws.com/xgboost",
+        f"{_XGBOOST_DLC_ACCOUNTS.get(region, '433757028032')}.dkr.ecr."
+        f"{region}.amazonaws.com/xgboost",
     )
     return json.loads(payload)
 
@@ -774,7 +829,11 @@ def validate_dry_run_definition(definition: Mapping[str, Any]) -> None:
         if parameter not in parameters:
             raise ValueError(f"Local DAG is missing required parameter: {parameter}")
 
-    register_step = next(step for step in _walk_steps(definition["Steps"]) if step["Name"] == "RegisterModelPendingManualApproval")
+    register_step = next(
+        step
+        for step in _walk_steps(definition["Steps"])
+        if step["Name"] == "RegisterModelPendingManualApproval"
+    )
     status = register_step["Arguments"].get("ModelApprovalStatus")
     if status != "PendingManualApproval":
         raise ValueError("Registered models must remain PendingManualApproval")
@@ -870,7 +929,9 @@ def build_sagemaker_pipeline(
             property_files=[property_file] if property_file else None,
         )
 
-    selection_report = PropertyFile(name="SelectionMetrics", output_name="selection", path="metrics.json")
+    selection_report = PropertyFile(
+        name="SelectionMetrics", output_name="selection", path="metrics.json"
+    )
     selection_step = processing_step(
         "SelectRecentBrandData",
         "data_selection.py",
@@ -936,7 +997,9 @@ def build_sagemaker_pipeline(
         },
     )
     training_step = TrainingStep(name="TrainBrandClassifier", estimator=estimator)
-    evaluation_report = PropertyFile(name="EvaluationMetrics", output_name="evaluation", path="metrics.json")
+    evaluation_report = PropertyFile(
+        name="EvaluationMetrics", output_name="evaluation", path="metrics.json"
+    )
     evaluation_step = processing_step(
         "EvaluateModel",
         "evaluation.py",
@@ -965,7 +1028,11 @@ def build_sagemaker_pipeline(
         name="EvaluateModelQualityGate",
         conditions=[
             ConditionGreaterThanOrEqualTo(
-                left=JsonGet(step_name=evaluation_step.name, property_file=evaluation_report, json_path="accuracy"),
+                left=JsonGet(
+                    step_name=evaluation_step.name,
+                    property_file=evaluation_report,
+                    json_path="accuracy",
+                ),
                 right=evaluation["accuracy_threshold"],
             ),
             ConditionLessThanOrEqualTo(
@@ -977,18 +1044,26 @@ def build_sagemaker_pipeline(
                 right=evaluation["fp_rate_emergency_threshold"],
             ),
             ConditionLessThanOrEqualTo(
-                left=JsonGet(step_name=evaluation_step.name, property_file=evaluation_report, json_path="latency_ms"),
+                left=JsonGet(
+                    step_name=evaluation_step.name,
+                    property_file=evaluation_report,
+                    json_path="latency_ms",
+                ),
                 right=evaluation["latency_budget_ms"],
             ),
         ],
         if_steps=[register_step],
-        else_steps=[FailStep(name="FailEvaluationGate", error_message="Model evaluation gate failed.")],
+        else_steps=[
+            FailStep(name="FailEvaluationGate", error_message="Model evaluation gate failed.")
+        ],
     )
     drift_gate = ConditionStep(
         name="DriftGate",
         conditions=[
             ConditionGreaterThanOrEqualTo(
-                left=JsonGet(step_name=drift_step.name, property_file=drift_report, json_path="confidence"),
+                left=JsonGet(
+                    step_name=drift_step.name, property_file=drift_report, json_path="confidence"
+                ),
                 right=config["drift"]["level1_confidence_floor"],
             )
         ],
@@ -999,23 +1074,35 @@ def build_sagemaker_pipeline(
         name="CleanlabQualityGate",
         conditions=[
             ConditionLessThanOrEqualTo(
-                left=JsonGet(step_name=quality_step.name, property_file=quality_report, json_path="flagged_fraction"),
+                left=JsonGet(
+                    step_name=quality_step.name,
+                    property_file=quality_report,
+                    json_path="flagged_fraction",
+                ),
                 right=config["cleanlab"]["flag_threshold_fraction"],
             )
         ],
         if_steps=[drift_step, drift_gate],
-        else_steps=[FailStep(name="FailCleanlabQuality", error_message="Cleanlab quality gate failed.")],
+        else_steps=[
+            FailStep(name="FailCleanlabQuality", error_message="Cleanlab quality gate failed.")
+        ],
     )
     dataset_gate = ConditionStep(
         name="DatasetBoundsGate",
         conditions=[
             ConditionGreaterThanOrEqualTo(
-                left=JsonGet(step_name=selection_step.name, property_file=selection_report, json_path="dataset_size"),
+                left=JsonGet(
+                    step_name=selection_step.name,
+                    property_file=selection_report,
+                    json_path="dataset_size",
+                ),
                 right=config["data_selection"]["target_dataset_min"],
             )
         ],
         if_steps=[embeddings_step, quality_step, quality_gate],
-        else_steps=[FailStep(name="FailDatasetBounds", error_message="Dataset bounds gate failed.")],
+        else_steps=[
+            FailStep(name="FailDatasetBounds", error_message="Dataset bounds gate failed.")
+        ],
     )
     return Pipeline(
         name=pipeline_name or f"miso-food-classifier-{brand.id}",

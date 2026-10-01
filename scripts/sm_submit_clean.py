@@ -4,16 +4,17 @@ Real cloud run on real images using the TensorFlow 2.14 CPU DLC (real
 EfficientNetV2 backbone). Uploads the runner + code, launches the job, and
 prints the job name so a poller can follow it.
 """
+
 from __future__ import annotations
 
-import sys
+import os
 import time
 
 import boto3
 
-REGION = "us-west-2"
-ACCOUNT = "363491582148"
-BUCKET = "sagemaker-us-west-2-363491582148"
+REGION = os.environ.get("AWS_REGION", "us-west-2")
+ACCOUNT = os.environ.get("MISO_ACCOUNT_ID", "<replace-with-account-id>")
+BUCKET = os.environ.get("MISO_BUCKET", f"sagemaker-{REGION}-{ACCOUNT}")
 ROLE = f"arn:aws:iam::{ACCOUNT}:role/miso-food-clf-sagemaker-exec"
 IMAGE = "763104351884.dkr.ecr.us-west-2.amazonaws.com/tensorflow-training:2.14.1-cpu-py310"
 PREFIX = "miso-smoke"

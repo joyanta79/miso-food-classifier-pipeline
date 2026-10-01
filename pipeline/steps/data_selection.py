@@ -12,6 +12,7 @@ scheme; the confidence field is retained for downstream reporting.
 
 Python 3.10 compatible (SageMaker DLC containers run 3.10).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -109,10 +110,14 @@ def main() -> None:
 
     metrics_out = Path(args.metrics_out)
     metrics_out.mkdir(parents=True, exist_ok=True)
-    (metrics_out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
-    print(f"[data_selection] dataset_size={metrics['dataset_size']} "
-          f"minimum_class_count={metrics['minimum_class_count']} "
-          f"distribution={metrics['class_distribution']}")
+    (metrics_out / "metrics.json").write_text(
+        json.dumps(metrics, indent=2) + "\n", encoding="utf-8"
+    )
+    print(
+        f"[data_selection] dataset_size={metrics['dataset_size']} "
+        f"minimum_class_count={metrics['minimum_class_count']} "
+        f"distribution={metrics['class_distribution']}"
+    )
 
 
 if __name__ == "__main__":

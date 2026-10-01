@@ -1,4 +1,5 @@
 """One-off: normalize real-image filenames to wc_<label>_<confidence>.jpg."""
+
 from pathlib import Path
 
 d = Path("tests/real_data/french_fries")

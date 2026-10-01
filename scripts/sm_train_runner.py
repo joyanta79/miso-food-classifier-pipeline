@@ -11,6 +11,7 @@ Smoke scope: 25 images/class cannot reach the spec's 0.97 accuracy gate. The
 goal is to prove the real training path executes on SageMaker and produces a
 saved model + metrics, not to hit production accuracy.
 """
+
 from __future__ import annotations
 
 import json
@@ -21,7 +22,7 @@ import sys
 from pathlib import Path
 
 CODE = Path("/opt/ml/input/data/code")
-RAW = Path("/opt/ml/input/data/train")          # flat images delivered here
+RAW = Path("/opt/ml/input/data/train")  # flat images delivered here
 MODEL = Path(os.getenv("SM_MODEL_DIR", "/opt/ml/model"))
 OUTPUT = Path(os.getenv("SM_OUTPUT_DATA_DIR", "/opt/ml/output/data"))
 WORK = Path("/tmp/miso_train")

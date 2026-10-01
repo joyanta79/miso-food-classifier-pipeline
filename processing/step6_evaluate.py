@@ -29,7 +29,9 @@ def read_predictions(path: str | Path) -> list[dict[str, Any]]:
                 continue
             record = json.loads(line)
             if not {"label", "prediction"} <= record.keys():
-                raise ValueError(f"Prediction line {line_number} requires label and prediction fields.")
+                raise ValueError(
+                    f"Prediction line {line_number} requires label and prediction fields."
+                )
             records.append(record)
     if not records:
         raise ValueError("Evaluation requires at least one prediction.")
@@ -37,14 +39,18 @@ def read_predictions(path: str | Path) -> list[dict[str, Any]]:
 
 
 def calculate_metrics(
-    predictions: Iterable[dict[str, Any]], done_label: str = "done", not_done_label: str = "not_done"
+    predictions: Iterable[dict[str, Any]],
+    done_label: str = "done",
+    not_done_label: str = "not_done",
 ) -> dict[str, Any]:
     records = list(predictions)
     if not records:
         raise ValueError("Evaluation requires at least one prediction.")
     actual_not_done = [record for record in records if record["label"] == not_done_label]
     false_positives = [record for record in actual_not_done if record["prediction"] == done_label]
-    confidences = [float(record["confidence"]) for record in records if record.get("confidence") is not None]
+    confidences = [
+        float(record["confidence"]) for record in records if record.get("confidence") is not None
+    ]
     fp_rate = len(false_positives) / len(actual_not_done) if actual_not_done else None
     accuracy = sum(record["label"] == record["prediction"] for record in records) / len(records)
     return {
@@ -56,7 +62,9 @@ def calculate_metrics(
         "fp_rate_done_when_not_done": fp_rate,
         "done_when_not_done_false_positives": len(false_positives),
         "not_done_sample_count": len(actual_not_done),
-        "label_distribution": dict(sorted(Counter(str(record["label"]) for record in records).items())),
+        "label_distribution": dict(
+            sorted(Counter(str(record["label"]) for record in records).items())
+        ),
         "confidence_summary": {
             "count": len(confidences),
             "mean": sum(confidences) / len(confidences) if confidences else None,
@@ -67,14 +75,24 @@ def calculate_metrics(
 
 
 def evaluate(
-    predictions: Iterable[dict[str, Any]], config: dict[str, Any], *, done_label: str = "done", not_done_label: str = "not_done"
+    predictions: Iterable[dict[str, Any]],
+    config: dict[str, Any],
+    *,
+    done_label: str = "done",
+    not_done_label: str = "not_done",
 ) -> dict[str, Any]:
     metrics = calculate_metrics(predictions, done_label, not_done_label)
     policy = config.get("evaluation", {})
     accuracy_threshold = float(policy.get("accuracy_threshold", 0.97))
     fp_threshold = float(policy.get("fp_rate_emergency_threshold", 0.05))
     fp_rate = metrics["done_when_not_done_fp_rate"]
-    quality_gate = "passed" if metrics["accuracy"] >= accuracy_threshold and fp_rate is not None and fp_rate <= fp_threshold else "failed"
+    quality_gate = (
+        "passed"
+        if metrics["accuracy"] >= accuracy_threshold
+        and fp_rate is not None
+        and fp_rate <= fp_threshold
+        else "failed"
+    )
     return {
         "schema_version": "1.0",
         "quality_gate": quality_gate,
@@ -119,7 +137,9 @@ def run(
     directory = Path(output_path)
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "evaluation.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    (directory / "metrics.json").write_text(json.dumps(report["metrics"], indent=2), encoding="utf-8")
+    (directory / "metrics.json").write_text(
+        json.dumps(report["metrics"], indent=2), encoding="utf-8"
+    )
     return report
 
 
@@ -140,16 +160,25 @@ def main(args: argparse.Namespace) -> dict[str, Any]:
     config = load_config(args.config)
     if args.predictions:
         report = evaluate(
-            read_predictions(args.predictions), config, done_label=args.done_label, not_done_label=args.not_done_label
+            read_predictions(args.predictions),
+            config,
+            done_label=args.done_label,
+            not_done_label=args.not_done_label,
         )
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "evaluation.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-        (output_dir / "metrics.json").write_text(json.dumps(report["metrics"], indent=2), encoding="utf-8")
+        (output_dir / "metrics.json").write_text(
+            json.dumps(report["metrics"], indent=2), encoding="utf-8"
+        )
         return report
     if not all((args.labels, args.probabilities, args.classes)):
-        raise ValueError("Provide --predictions or all of --labels, --probabilities, and --classes.")
-    return run(args.labels, args.probabilities, args.classes, args.output_dir, args.done_label, config)
+        raise ValueError(
+            "Provide --predictions or all of --labels, --probabilities, and --classes."
+        )
+    return run(
+        args.labels, args.probabilities, args.classes, args.output_dir, args.done_label, config
+    )
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ CleanLab filtering (Step 3), and writes results to /opt/ml/processing/output.
 Injects a few deliberate mislabels so Step 3 detection can be demonstrated on
 the smoke dataset, exactly as the local end-to-end driver does.
 """
+
 from __future__ import annotations
 
 import json
@@ -44,8 +45,7 @@ def main() -> int:
     image_dir = IN / "images"
     now = datetime.now(UTC).isoformat()
     inventory = [
-        {"key": p.name, "id": p.name, "last_modified": now}
-        for p in sorted(image_dir.glob("*.jpg"))
+        {"key": p.name, "id": p.name, "last_modified": now} for p in sorted(image_dir.glob("*.jpg"))
     ]
     print(f"[step0] inventory: {len(inventory)} images", flush=True)
 

@@ -17,6 +17,7 @@ emergency false-positive rate (treating the first class alphabetically as the
 
 Python 3.10 compatible.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -54,7 +55,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="EvaluateModel step")
     parser.add_argument("--model", default="/opt/ml/processing/input/model")
     parser.add_argument("--images", default="/opt/ml/processing/input/images")
-    parser.add_argument("--cleaned", default="/opt/ml/processing/input/dataset/cleaned_dataset.json")
+    parser.add_argument(
+        "--cleaned", default="/opt/ml/processing/input/dataset/cleaned_dataset.json"
+    )
     parser.add_argument("--metrics-out", default="/opt/ml/processing/output/metrics")
     args = parser.parse_args()
 
@@ -88,7 +91,9 @@ def main() -> None:
         if not path.exists():
             continue
         with Image.open(path) as handle:
-            arr = np.asarray(handle.convert("RGB").resize((image_size, image_size)), dtype=np.float32)
+            arr = np.asarray(
+                handle.convert("RGB").resize((image_size, image_size)), dtype=np.float32
+            )
         x = tf.keras.applications.efficientnet_v2.preprocess_input(arr[np.newaxis, ...])
         started = time.perf_counter()
         probs = model.predict(x, verbose=0)[0]
@@ -117,9 +122,13 @@ def main() -> None:
     }
     metrics_out = Path(args.metrics_out)
     metrics_out.mkdir(parents=True, exist_ok=True)
-    (metrics_out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
-    print(f"[evaluation] accuracy={accuracy:.3f} "
-          f"emergency_fp_rate={emergency_fp_rate:.3f} latency_ms={latency_ms:.1f} n={total}")
+    (metrics_out / "metrics.json").write_text(
+        json.dumps(metrics, indent=2) + "\n", encoding="utf-8"
+    )
+    print(
+        f"[evaluation] accuracy={accuracy:.3f} "
+        f"emergency_fp_rate={emergency_fp_rate:.3f} latency_ms={latency_ms:.1f} n={total}"
+    )
 
 
 if __name__ == "__main__":

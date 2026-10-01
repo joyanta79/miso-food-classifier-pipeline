@@ -9,13 +9,13 @@
 # the end-to-end infrastructure smoke run, never for a real training run.
 aws:
   region: us-west-2
-  account_id: "363491582148"
-  sagemaker_role_arn: "arn:aws:iam::363491582148:role/miso-food-clf-sagemaker-exec"
+  account_id: "<replace-with-account-id>"
+  sagemaker_role_arn: "arn:aws:iam::<replace-with-account-id>:role/miso-food-clf-sagemaker-exec"
 s3:
-  training_bucket: "sagemaker-us-west-2-363491582148"
-  model_artifacts_bucket: "sagemaker-us-west-2-363491582148"
-  pipeline_artifacts_bucket: "sagemaker-us-west-2-363491582148"
-  raw_archive_bucket: "sagemaker-us-west-2-363491582148"
+  training_bucket: "sagemaker-us-west-2-<replace-with-account-id>"
+  model_artifacts_bucket: "sagemaker-us-west-2-<replace-with-account-id>"
+  pipeline_artifacts_bucket: "sagemaker-us-west-2-<replace-with-account-id>"
+  raw_archive_bucket: "sagemaker-us-west-2-<replace-with-account-id>"
 brands:
   - id: white-castle
     naming_pattern: "wc_*"
@@ -54,9 +54,9 @@ drift:
   level2_confidence_threshold: 0.70
   correction_rate_multiplier: 3
 notifications:
-  review_topic_arn: "arn:aws:sns:us-west-2:363491582148:miso-review"
-  ml_lead_topic_arn: "arn:aws:sns:us-west-2:363491582148:miso-ml-lead"
-  vp_engineering_topic_arn: "arn:aws:sns:us-west-2:363491582148:miso-vp-eng"
+  review_topic_arn: "arn:aws:sns:us-west-2:<replace-with-account-id>:miso-review"
+  ml_lead_topic_arn: "arn:aws:sns:us-west-2:<replace-with-account-id>:miso-ml-lead"
+  vp_engineering_topic_arn: "arn:aws:sns:us-west-2:<replace-with-account-id>:miso-vp-eng"
 local_mode:
   enabled: false
   mock_aws: false

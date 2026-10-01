@@ -98,7 +98,9 @@ def s3_trigger_handler(
     }
 
 
-def _pipeline_parameters(brand_id: str, trigger: str, config: dict[str, Any]) -> list[dict[str, str]]:
+def _pipeline_parameters(
+    brand_id: str, trigger: str, config: dict[str, Any]
+) -> list[dict[str, str]]:
     return [
         {"Name": "BrandId", "Value": brand_id},
         {"Name": "TriggerSource", "Value": trigger},

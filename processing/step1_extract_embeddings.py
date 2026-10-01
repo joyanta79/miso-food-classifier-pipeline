@@ -16,6 +16,7 @@ image is loadable and TF/Pillow import; deterministic otherwise), and reported i
 ``embedding_backend`` on each output record so downstream steps and tests can
 assert which path ran.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -33,7 +34,9 @@ DEFAULT_IMAGE_SIZE = 224
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 
 
-def deterministic_embedding(payload: bytes | np.ndarray, dimension: int = DEFAULT_EMBEDDING_DIM) -> np.ndarray:
+def deterministic_embedding(
+    payload: bytes | np.ndarray, dimension: int = DEFAULT_EMBEDDING_DIM
+) -> np.ndarray:
     """Derive a stable unit-length embedding from local bytes without ML dependencies."""
     raw = payload.tobytes() if isinstance(payload, np.ndarray) else payload
     values = np.empty(dimension, dtype=np.float32)
@@ -132,7 +135,9 @@ def _embed_record(
             vector = _real_embedding(path, image_size, weights)
             if vector is not None and vector.shape[0] == embedding_dim:
                 return vector.astype(np.float32), "efficientnet"
-    return deterministic_embedding(_read_local_payload(record, image_root), embedding_dim), "deterministic"
+    return deterministic_embedding(
+        _read_local_payload(record, image_root), embedding_dim
+    ), "deterministic"
 
 
 def deduplicate_cosine(embeddings: np.ndarray, threshold: float) -> np.ndarray:
@@ -185,7 +190,11 @@ def extract_embeddings(
     else:
         embeddings = np.empty((0, embedding_dim), dtype=np.float32)
         backends = []
-    kept = deduplicate_cosine(embeddings, cosine_dedup_threshold) if len(records) else np.array([], dtype=int)
+    kept = (
+        deduplicate_cosine(embeddings, cosine_dedup_threshold)
+        if len(records)
+        else np.array([], dtype=int)
+    )
     mapping = []
     for index in kept:
         record = dict(records[int(index)])
@@ -195,15 +204,21 @@ def extract_embeddings(
     return embeddings[kept], mapping
 
 
-def write_outputs(embeddings: np.ndarray, mapping: list[dict[str, Any]], output_dir: str | Path) -> None:
+def write_outputs(
+    embeddings: np.ndarray, mapping: list[dict[str, Any]], output_dir: str | Path
+) -> None:
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
     np.save(directory / "embeddings.npy", embeddings)
-    (directory / "embedding_mapping.json").write_text(json.dumps(mapping, indent=2) + "\n", encoding="utf-8")
+    (directory / "embedding_mapping.json").write_text(
+        json.dumps(mapping, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Extract image embeddings (EfficientNetV2 or deterministic)")
+    parser = argparse.ArgumentParser(
+        description="Extract image embeddings (EfficientNetV2 or deterministic)"
+    )
     parser.add_argument("--manifest", default="/opt/ml/processing/input/curated_manifest.json")
     parser.add_argument("--output-dir", default="/opt/ml/processing/output")
     parser.add_argument("--image-root")
@@ -218,7 +233,10 @@ def main() -> None:
     parser.add_argument(
         "--backbone-weights",
         default="imagenet",
-        help="Weights for EfficientNetV2 (imagenet or a local path); 'none' disables pretrained weights.",
+        help=(
+            "Weights for EfficientNetV2 (imagenet or a local path); "
+            "'none' disables pretrained weights."
+        ),
     )
     args = parser.parse_args()
     manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))

@@ -1,4 +1,5 @@
 """Deterministic local fixtures for the data-cleaning pipeline tests."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -21,12 +22,21 @@ def inventory_for_selection(now: datetime | None = None) -> list[dict[str, Any]]
             )
     inventory.extend(
         [
-            {"id": "other-brand", "key": "bb_fries_0.9.jpg", "last_modified": reference.isoformat()},
             {
-                "id": "old", "key": "wc_fries_0.9.jpg",
+                "id": "other-brand",
+                "key": "bb_fries_0.9.jpg",
+                "last_modified": reference.isoformat(),
+            },
+            {
+                "id": "old",
+                "key": "wc_fries_0.9.jpg",
                 "last_modified": (reference - timedelta(days=400)).isoformat(),
             },
-            {"id": "underrepresented", "key": "wc_salad_0.9.jpg", "last_modified": reference.isoformat()},
+            {
+                "id": "underrepresented",
+                "key": "wc_salad_0.9.jpg",
+                "last_modified": reference.isoformat(),
+            },
         ]
     )
     return inventory
@@ -40,7 +50,9 @@ def embedding_fixture(
     features = []
     labels = []
     for class_id in range(classes):
-        features.append(centers[class_id] + rng.normal(scale=0.25, size=(samples_per_class, dimensions)))
+        features.append(
+            centers[class_id] + rng.normal(scale=0.25, size=(samples_per_class, dimensions))
+        )
         labels.extend([f"class-{class_id}"] * samples_per_class)
     return np.vstack(features).astype(np.float32), labels
 
@@ -57,6 +69,9 @@ def mislabeled_probabilities(
     probabilities = np.full((total, classes), 0.02 / max(classes - 1, 1), dtype=np.float64)
     probabilities[np.arange(total), true_labels] = 0.98
     class_names = [f"class-{index}" for index in range(classes)]
-    mapping = [{"id": f"image-{index}", "label": class_names[label]} for index, label in enumerate(stored_labels)]
+    mapping = [
+        {"id": f"image-{index}", "label": class_names[label]}
+        for index, label in enumerate(stored_labels)
+    ]
     injected_ids = {f"image-{index}" for index in injected_indices}
     return probabilities, mapping, class_names, injected_ids

@@ -12,6 +12,7 @@ into model.tar.gz.
 
 Python 3.10 compatible.
 """
+
 from __future__ import annotations
 
 import json
@@ -25,7 +26,9 @@ sys.path.insert(0, "/opt/ml/input/data/pkgcode")
 from training.train import train_model  # noqa: E402
 
 
-def _prep_class_dirs(images_root: Path, cleaned: list[dict], work: Path, val_fraction: float = 0.2) -> None:
+def _prep_class_dirs(
+    images_root: Path, cleaned: list[dict], work: Path, val_fraction: float = 0.2
+) -> None:
     by_class: dict[str, list[dict]] = {}
     for record in cleaned:
         by_class.setdefault(record["label"], []).append(record)
@@ -50,7 +53,6 @@ def _prep_class_dirs(images_root: Path, cleaned: list[dict], work: Path, val_fra
 def main() -> None:
     images_root = Path(os.getenv("SM_CHANNEL_IMAGES", "/opt/ml/input/data/images"))
     dataset_root = Path(os.getenv("SM_CHANNEL_DATASET", "/opt/ml/input/data/dataset"))
-    code_root = Path(os.getenv("SM_CHANNEL_PKGCODE", "/opt/ml/input/data/pkgcode"))
     model_dir = Path(os.getenv("SM_MODEL_DIR", "/opt/ml/model"))
     checkpoint_dir = Path(os.getenv("SM_CHECKPOINT_DIR", "/opt/ml/checkpoints"))
     output_dir = Path(os.getenv("SM_OUTPUT_DATA_DIR", "/opt/ml/output/data"))

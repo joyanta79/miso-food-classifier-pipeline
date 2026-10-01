@@ -52,7 +52,10 @@ def test_registers_pending_manual_approval_persists_baseline_and_emits_event():
     assert registration["ModelPackageGroupName"] == "FoodClassifier-WhiteCastle"
     assert registration["ModelApprovalStatus"] == PENDING_APPROVAL
     assert registration["CustomerMetadataProperties"]["manual_approval_required"] == "true"
-    assert registration["ModelMetrics"]["ModelQuality"]["Statistics"]["S3Uri"] == "s3://pipeline-artifacts/evaluation.json"
+    assert (
+        registration["ModelMetrics"]["ModelQuality"]["Statistics"]["S3Uri"]
+        == "s3://pipeline-artifacts/evaluation.json"
+    )
 
     baseline_call = s3.put_object.call_args.kwargs
     baseline = json.loads(baseline_call["Body"].decode("utf-8"))

@@ -15,6 +15,7 @@ configured limit.
 
 Python 3.10 compatible.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -44,7 +45,11 @@ def main() -> None:
     pred_probs_path = Path(args.pred_probs)
     if pred_probs_path.exists():
         probabilities = np.load(pred_probs_path)
-        confidence = float(np.mean(np.max(probabilities, axis=1))) if len(probabilities) else confidence_baseline
+        confidence = (
+            float(np.mean(np.max(probabilities, axis=1)))
+            if len(probabilities)
+            else confidence_baseline
+        )
     else:
         confidence = confidence_baseline
 
@@ -59,9 +64,13 @@ def main() -> None:
     }
     metrics_out = Path(args.metrics_out)
     metrics_out.mkdir(parents=True, exist_ok=True)
-    (metrics_out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
-    print(f"[drift_detection] confidence={confidence:.3f} "
-          f"correction_rate_multiplier={correction_rate_multiplier}")
+    (metrics_out / "metrics.json").write_text(
+        json.dumps(metrics, indent=2) + "\n", encoding="utf-8"
+    )
+    print(
+        f"[drift_detection] confidence={confidence:.3f} "
+        f"correction_rate_multiplier={correction_rate_multiplier}"
+    )
 
 
 if __name__ == "__main__":
