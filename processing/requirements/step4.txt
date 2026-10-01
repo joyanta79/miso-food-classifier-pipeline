@@ -1,0 +1,4 @@
+numpy==1.26.4
+scikit-learn==1.4.2
+xgboost==2.0.3
+cleanlab==2.6.4

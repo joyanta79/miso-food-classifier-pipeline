@@ -1,0 +1,1278 @@
+{
+  "Parameters": [
+    {
+      "DefaultValue": "us-west-2",
+      "Description": "AWS Region hosting this pipeline.",
+      "Name": "Region",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": "<replace-with-account-id>",
+      "Description": "Target AWS account identifier.",
+      "Name": "AccountId",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": "<replace-with-sagemaker-role-arn>",
+      "Description": "Execution role for SageMaker jobs.",
+      "Name": "SageMakerRoleArn",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": "<replace-training-bucket>",
+      "Description": "S3 bucket for prepared training datasets.",
+      "Name": "TrainingBucket",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": "<replace-model-artifacts-bucket>",
+      "Description": "S3 bucket for trained model artifacts and checkpoints.",
+      "Name": "ModelArtifactsBucket",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": "<replace-pipeline-artifacts-bucket>",
+      "Description": "S3 bucket for pipeline outputs and container code contracts.",
+      "Name": "PipelineArtifactsBucket",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": "<replace-raw-archive-bucket>",
+      "Description": "S3 bucket containing raw image archives.",
+      "Name": "RawArchiveBucket",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": "white-castle",
+      "Description": "Fixed pipeline brand identifier.",
+      "Name": "BrandId",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": "wc_*",
+      "Description": "Allowed raw-data filename prefix pattern.",
+      "Name": "BrandNamingPattern",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": "FoodClassifier-WhiteCastle",
+      "Description": "Brand-specific SageMaker Model Registry package group.",
+      "Name": "ModelPackageGroup",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": 6,
+      "Description": "Maximum image age to select.",
+      "Name": "RecencyMonths",
+      "Type": "Integer"
+    },
+    {
+      "DefaultValue": 500,
+      "Description": "Minimum images required in each retained class.",
+      "Name": "MinImagesPerClass",
+      "Type": "Integer"
+    },
+    {
+      "DefaultValue": 6000,
+      "Description": "Minimum accepted dataset size.",
+      "Name": "TargetDatasetMin",
+      "Type": "Integer"
+    },
+    {
+      "DefaultValue": 50000,
+      "Description": "Maximum accepted dataset size.",
+      "Name": "TargetDatasetMax",
+      "Type": "Integer"
+    },
+    {
+      "DefaultValue": "imagenet",
+      "Description": "Embedding backbone provenance.",
+      "Name": "BackboneSource",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": "<replace-with-prior-production-backbone-path>",
+      "Description": "Prior-production backbone path used for embeddings.",
+      "Name": "BackboneModelPath",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": 1280,
+      "Description": "Embedding vector dimensionality.",
+      "Name": "EmbeddingDim",
+      "Type": "Integer"
+    },
+    {
+      "DefaultValue": 0.99,
+      "Description": "Cosine similarity above which an image is deduplicated.",
+      "Name": "CosineDedupThreshold",
+      "Type": "Float"
+    },
+    {
+      "DefaultValue": 5,
+      "Description": "Number of cross-validation folds.",
+      "Name": "KFoldCount",
+      "Type": "Integer"
+    },
+    {
+      "DefaultValue": "xgboost",
+      "Description": "Classifier implementation used for training.",
+      "Name": "Classifier",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": 0.05,
+      "Description": "Maximum tolerated fraction of Cleanlab label-quality flags.",
+      "Name": "CleanlabFlagThresholdFraction",
+      "Type": "Float"
+    },
+    {
+      "DefaultValue": "ml.g4dn.xlarge",
+      "Description": "SageMaker training instance type.",
+      "Name": "TrainingInstanceType",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": "ml.m5.xlarge",
+      "Description": "SageMaker processing instance type.",
+      "Name": "ProcessingInstanceType",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": true,
+      "Description": "Whether managed spot training is enabled.",
+      "Name": "UseSpot",
+      "Type": "Boolean"
+    },
+    {
+      "DefaultValue": 50,
+      "Description": "Maximum training epochs.",
+      "Name": "Epochs",
+      "Type": "Integer"
+    },
+    {
+      "DefaultValue": 32,
+      "Description": "Training batch size.",
+      "Name": "BatchSize",
+      "Type": "Integer"
+    },
+    {
+      "DefaultValue": 0.001,
+      "Description": "Training learning rate.",
+      "Name": "LearningRate",
+      "Type": "Float"
+    },
+    {
+      "DefaultValue": 5,
+      "Description": "Epoch interval for persisted training checkpoints.",
+      "Name": "CheckpointEveryEpochs",
+      "Type": "Integer"
+    },
+    {
+      "DefaultValue": 224,
+      "Description": "Square input image size in pixels.",
+      "Name": "ImageSize",
+      "Type": "Integer"
+    },
+    {
+      "DefaultValue": 0.97,
+      "Description": "Minimum accepted accuracy.",
+      "Name": "AccuracyThreshold",
+      "Type": "Float"
+    },
+    {
+      "DefaultValue": 0.05,
+      "Description": "Maximum accepted emergency false-positive rate.",
+      "Name": "FpRateEmergencyThreshold",
+      "Type": "Float"
+    },
+    {
+      "DefaultValue": 1000,
+      "Description": "Maximum accepted inference latency.",
+      "Name": "LatencyBudgetMs",
+      "Type": "Integer"
+    },
+    {
+      "DefaultValue": 0.85,
+      "Description": "Reference confidence level for drift detection.",
+      "Name": "ConfidenceBaseline",
+      "Type": "Float"
+    },
+    {
+      "DefaultValue": 0.65,
+      "Description": "Level 1 intervention confidence floor.",
+      "Name": "Level1ConfidenceFloor",
+      "Type": "Float"
+    },
+    {
+      "DefaultValue": 0.7,
+      "Description": "Level 2 escalation confidence threshold.",
+      "Name": "Level2ConfidenceThreshold",
+      "Type": "Float"
+    },
+    {
+      "DefaultValue": 3,
+      "Description": "Correction-rate multiplier that triggers drift action.",
+      "Name": "CorrectionRateMultiplier",
+      "Type": "Integer"
+    },
+    {
+      "DefaultValue": "<replace-with-review-sns-topic-arn>",
+      "Description": "Human review notification topic.",
+      "Name": "ReviewTopicArn",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": "<replace-with-ml-lead-sns-topic-arn>",
+      "Description": "ML lead notification topic.",
+      "Name": "MlLeadTopicArn",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": "<replace-with-vp-engineering-sns-topic-arn>",
+      "Description": "VP Engineering escalation notification topic.",
+      "Name": "VpEngineeringTopicArn",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": true,
+      "Description": "Whether local dry-run support is enabled.",
+      "Name": "LocalModeEnabled",
+      "Type": "Boolean"
+    },
+    {
+      "DefaultValue": true,
+      "Description": "Whether local mode uses mocked AWS services.",
+      "Name": "MockAws",
+      "Type": "Boolean"
+    },
+    {
+      "DefaultValue": false,
+      "Description": "Whether local mode loads ImageNet weights.",
+      "Name": "UseImagenetWeights",
+      "Type": "Boolean"
+    },
+    {
+      "DefaultValue": 2026,
+      "Description": "Deterministic local-mode random seed.",
+      "Name": "Seed",
+      "Type": "Integer"
+    }
+  ],
+  "Steps": [
+    {
+      "Arguments": {
+        "AppSpecification": {
+          "ContainerEntrypoint": [
+            "python3",
+            "/opt/ml/processing/input/code/data_selection.py"
+          ],
+          "ImageUri": "683313688378.dkr.ecr.us-west-2.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3"
+        },
+        "Environment": {
+          "BRAND_ID": {
+            "Get": "Parameters.BrandId"
+          },
+          "MIN_IMAGES_PER_CLASS": {
+            "Get": "Parameters.MinImagesPerClass"
+          },
+          "NAMING_PATTERN": {
+            "Get": "Parameters.BrandNamingPattern"
+          },
+          "RECENCY_MONTHS": {
+            "Get": "Parameters.RecencyMonths"
+          },
+          "SEED": {
+            "Get": "Parameters.Seed"
+          },
+          "TARGET_DATASET_MAX": {
+            "Get": "Parameters.TargetDatasetMax"
+          },
+          "TARGET_DATASET_MIN": {
+            "Get": "Parameters.TargetDatasetMin"
+          }
+        },
+        "ProcessingInputs": [
+          {
+            "InputName": "raw-archive",
+            "S3Input": {
+              "LocalPath": "/opt/ml/processing/input/raw",
+              "S3DataType": "S3Prefix",
+              "S3InputMode": "File",
+              "S3Uri": {
+                "Std:Join": {
+                  "On": "/",
+                  "Values": [
+                    "s3:/",
+                    {
+                      "Get": "Parameters.RawArchiveBucket"
+                    },
+                    ""
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "InputName": "pipeline-code",
+            "S3Input": {
+              "LocalPath": "/opt/ml/processing/input/code",
+              "S3DataType": "S3Prefix",
+              "S3InputMode": "File",
+              "S3Uri": {
+                "Std:Join": {
+                  "On": "/",
+                  "Values": [
+                    "s3:/",
+                    {
+                      "Get": "Parameters.PipelineArtifactsBucket"
+                    },
+                    "code"
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "ProcessingOutputConfig": {
+          "Outputs": [
+            {
+              "OutputName": "selected-dataset",
+              "S3Output": {
+                "LocalPath": "/opt/ml/processing/output/dataset",
+                "S3UploadMode": "EndOfJob",
+                "S3Uri": {
+                  "Std:Join": {
+                    "On": "/",
+                    "Values": [
+                      "s3:/",
+                      {
+                        "Get": "Parameters.TrainingBucket"
+                      },
+                      "white-castle",
+                      "selected"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "OutputName": "selection-metrics",
+              "S3Output": {
+                "LocalPath": "/opt/ml/processing/output/metrics",
+                "S3UploadMode": "EndOfJob",
+                "S3Uri": {
+                  "Std:Join": {
+                    "On": "/",
+                    "Values": [
+                      "s3:/",
+                      {
+                        "Get": "Parameters.PipelineArtifactsBucket"
+                      },
+                      "white-castle",
+                      "selection"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "ProcessingResources": {
+          "ClusterConfig": {
+            "InstanceCount": 1,
+            "InstanceType": {
+              "Get": "Parameters.ProcessingInstanceType"
+            },
+            "VolumeSizeInGB": 30
+          }
+        },
+        "RoleArn": {
+          "Get": "Parameters.SageMakerRoleArn"
+        }
+      },
+      "Name": "SelectRecentBrandData",
+      "PropertyFiles": [
+        {
+          "OutputName": "selection-metrics",
+          "Path": "metrics.json",
+          "PropertyFileName": "SelectionMetrics"
+        }
+      ],
+      "Type": "Processing"
+    },
+    {
+      "Arguments": {
+        "Conditions": [
+          {
+            "LeftValue": {
+              "Std:JsonGet": {
+                "Path": "dataset_size",
+                "PropertyFile": {
+                  "Get": "Steps.SelectRecentBrandData.PropertyFiles.SelectionMetrics"
+                }
+              }
+            },
+            "RightValue": {
+              "Get": "Parameters.TargetDatasetMin"
+            },
+            "Type": "ConditionGreaterThanOrEqualTo"
+          },
+          {
+            "LeftValue": {
+              "Std:JsonGet": {
+                "Path": "dataset_size",
+                "PropertyFile": {
+                  "Get": "Steps.SelectRecentBrandData.PropertyFiles.SelectionMetrics"
+                }
+              }
+            },
+            "RightValue": {
+              "Get": "Parameters.TargetDatasetMax"
+            },
+            "Type": "ConditionLessThanOrEqualTo"
+          },
+          {
+            "LeftValue": {
+              "Std:JsonGet": {
+                "Path": "minimum_class_count",
+                "PropertyFile": {
+                  "Get": "Steps.SelectRecentBrandData.PropertyFiles.SelectionMetrics"
+                }
+              }
+            },
+            "RightValue": {
+              "Get": "Parameters.MinImagesPerClass"
+            },
+            "Type": "ConditionGreaterThanOrEqualTo"
+          }
+        ],
+        "ElseSteps": [
+          {
+            "Arguments": {
+              "ErrorMessage": "Selected dataset is outside configured size or class-coverage bounds."
+            },
+            "Name": "FailDatasetBounds",
+            "Type": "Fail"
+          }
+        ],
+        "IfSteps": [
+          {
+            "Arguments": {
+              "AppSpecification": {
+                "ContainerEntrypoint": [
+                  "python3",
+                  "/opt/ml/processing/input/code/embedding_dedup.py"
+                ],
+                "ImageUri": "683313688378.dkr.ecr.us-west-2.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3"
+              },
+              "Environment": {
+                "BACKBONE_MODEL_PATH": {
+                  "Get": "Parameters.BackboneModelPath"
+                },
+                "BACKBONE_SOURCE": {
+                  "Get": "Parameters.BackboneSource"
+                },
+                "COSINE_DEDUP_THRESHOLD": {
+                  "Get": "Parameters.CosineDedupThreshold"
+                },
+                "EMBEDDING_DIM": {
+                  "Get": "Parameters.EmbeddingDim"
+                },
+                "SEED": {
+                  "Get": "Parameters.Seed"
+                },
+                "USE_IMAGENET_WEIGHTS": {
+                  "Get": "Parameters.UseImagenetWeights"
+                }
+              },
+              "ProcessingInputs": [
+                {
+                  "InputName": "selected-dataset",
+                  "S3Input": {
+                    "LocalPath": "/opt/ml/processing/input/dataset",
+                    "S3DataType": "S3Prefix",
+                    "S3InputMode": "File",
+                    "S3Uri": {
+                      "Std:Join": {
+                        "On": "/",
+                        "Values": [
+                          "s3:/",
+                          {
+                            "Get": "Parameters.TrainingBucket"
+                          },
+                          "white-castle",
+                          "selected"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "InputName": "pipeline-code",
+                  "S3Input": {
+                    "LocalPath": "/opt/ml/processing/input/code",
+                    "S3DataType": "S3Prefix",
+                    "S3InputMode": "File",
+                    "S3Uri": {
+                      "Std:Join": {
+                        "On": "/",
+                        "Values": [
+                          "s3:/",
+                          {
+                            "Get": "Parameters.PipelineArtifactsBucket"
+                          },
+                          "code"
+                        ]
+                      }
+                    }
+                  }
+                }
+              ],
+              "ProcessingOutputConfig": {
+                "Outputs": [
+                  {
+                    "OutputName": "deduplicated-dataset",
+                    "S3Output": {
+                      "LocalPath": "/opt/ml/processing/output/dataset",
+                      "S3UploadMode": "EndOfJob",
+                      "S3Uri": {
+                        "Std:Join": {
+                          "On": "/",
+                          "Values": [
+                            "s3:/",
+                            {
+                              "Get": "Parameters.TrainingBucket"
+                            },
+                            "white-castle",
+                            "deduplicated"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "ProcessingResources": {
+                "ClusterConfig": {
+                  "InstanceCount": 1,
+                  "InstanceType": {
+                    "Get": "Parameters.ProcessingInstanceType"
+                  },
+                  "VolumeSizeInGB": 30
+                }
+              },
+              "RoleArn": {
+                "Get": "Parameters.SageMakerRoleArn"
+              }
+            },
+            "Name": "EmbedAndDeduplicate",
+            "Type": "Processing"
+          },
+          {
+            "Arguments": {
+              "AppSpecification": {
+                "ContainerEntrypoint": [
+                  "python3",
+                  "/opt/ml/processing/input/code/kfold_cleanlab.py"
+                ],
+                "ImageUri": "683313688378.dkr.ecr.us-west-2.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3"
+              },
+              "Environment": {
+                "CLASSIFIER": {
+                  "Get": "Parameters.Classifier"
+                },
+                "CLEANLAB_FLAG_THRESHOLD_FRACTION": {
+                  "Get": "Parameters.CleanlabFlagThresholdFraction"
+                },
+                "KFOLD_COUNT": {
+                  "Get": "Parameters.KFoldCount"
+                },
+                "SEED": {
+                  "Get": "Parameters.Seed"
+                }
+              },
+              "ProcessingInputs": [
+                {
+                  "InputName": "deduplicated-dataset",
+                  "S3Input": {
+                    "LocalPath": "/opt/ml/processing/input/dataset",
+                    "S3DataType": "S3Prefix",
+                    "S3InputMode": "File",
+                    "S3Uri": {
+                      "Std:Join": {
+                        "On": "/",
+                        "Values": [
+                          "s3:/",
+                          {
+                            "Get": "Parameters.TrainingBucket"
+                          },
+                          "white-castle",
+                          "deduplicated"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "InputName": "pipeline-code",
+                  "S3Input": {
+                    "LocalPath": "/opt/ml/processing/input/code",
+                    "S3DataType": "S3Prefix",
+                    "S3InputMode": "File",
+                    "S3Uri": {
+                      "Std:Join": {
+                        "On": "/",
+                        "Values": [
+                          "s3:/",
+                          {
+                            "Get": "Parameters.PipelineArtifactsBucket"
+                          },
+                          "code"
+                        ]
+                      }
+                    }
+                  }
+                }
+              ],
+              "ProcessingOutputConfig": {
+                "Outputs": [
+                  {
+                    "OutputName": "quality-dataset",
+                    "S3Output": {
+                      "LocalPath": "/opt/ml/processing/output/dataset",
+                      "S3UploadMode": "EndOfJob",
+                      "S3Uri": {
+                        "Std:Join": {
+                          "On": "/",
+                          "Values": [
+                            "s3:/",
+                            {
+                              "Get": "Parameters.TrainingBucket"
+                            },
+                            "white-castle",
+                            "quality"
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "OutputName": "quality-metrics",
+                    "S3Output": {
+                      "LocalPath": "/opt/ml/processing/output/metrics",
+                      "S3UploadMode": "EndOfJob",
+                      "S3Uri": {
+                        "Std:Join": {
+                          "On": "/",
+                          "Values": [
+                            "s3:/",
+                            {
+                              "Get": "Parameters.PipelineArtifactsBucket"
+                            },
+                            "white-castle",
+                            "quality"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "ProcessingResources": {
+                "ClusterConfig": {
+                  "InstanceCount": 1,
+                  "InstanceType": {
+                    "Get": "Parameters.ProcessingInstanceType"
+                  },
+                  "VolumeSizeInGB": 30
+                }
+              },
+              "RoleArn": {
+                "Get": "Parameters.SageMakerRoleArn"
+              }
+            },
+            "Name": "KFoldCleanlabQuality",
+            "PropertyFiles": [
+              {
+                "OutputName": "quality-metrics",
+                "Path": "metrics.json",
+                "PropertyFileName": "QualityMetrics"
+              }
+            ],
+            "Type": "Processing"
+          },
+          {
+            "Arguments": {
+              "Conditions": [
+                {
+                  "LeftValue": {
+                    "Std:JsonGet": {
+                      "Path": "flagged_fraction",
+                      "PropertyFile": {
+                        "Get": "Steps.KFoldCleanlabQuality.PropertyFiles.QualityMetrics"
+                      }
+                    }
+                  },
+                  "RightValue": {
+                    "Get": "Parameters.CleanlabFlagThresholdFraction"
+                  },
+                  "Type": "ConditionLessThanOrEqualTo"
+                }
+              ],
+              "ElseSteps": [
+                {
+                  "Arguments": {
+                    "ErrorMessage": "Cleanlab flagged label fraction exceeds the configured threshold."
+                  },
+                  "Name": "FailCleanlabQuality",
+                  "Type": "Fail"
+                }
+              ],
+              "IfSteps": [
+                {
+                  "Arguments": {
+                    "AppSpecification": {
+                      "ContainerEntrypoint": [
+                        "python3",
+                        "/opt/ml/processing/input/code/drift_detection.py"
+                      ],
+                      "ImageUri": "683313688378.dkr.ecr.us-west-2.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3"
+                    },
+                    "Environment": {
+                      "CONFIDENCE_BASELINE": {
+                        "Get": "Parameters.ConfidenceBaseline"
+                      },
+                      "CORRECTION_RATE_MULTIPLIER": {
+                        "Get": "Parameters.CorrectionRateMultiplier"
+                      },
+                      "LEVEL1_CONFIDENCE_FLOOR": {
+                        "Get": "Parameters.Level1ConfidenceFloor"
+                      },
+                      "LEVEL2_CONFIDENCE_THRESHOLD": {
+                        "Get": "Parameters.Level2ConfidenceThreshold"
+                      }
+                    },
+                    "ProcessingInputs": [
+                      {
+                        "InputName": "quality-dataset",
+                        "S3Input": {
+                          "LocalPath": "/opt/ml/processing/input/dataset",
+                          "S3DataType": "S3Prefix",
+                          "S3InputMode": "File",
+                          "S3Uri": {
+                            "Std:Join": {
+                              "On": "/",
+                              "Values": [
+                                "s3:/",
+                                {
+                                  "Get": "Parameters.TrainingBucket"
+                                },
+                                "white-castle",
+                                "quality"
+                              ]
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "InputName": "pipeline-code",
+                        "S3Input": {
+                          "LocalPath": "/opt/ml/processing/input/code",
+                          "S3DataType": "S3Prefix",
+                          "S3InputMode": "File",
+                          "S3Uri": {
+                            "Std:Join": {
+                              "On": "/",
+                              "Values": [
+                                "s3:/",
+                                {
+                                  "Get": "Parameters.PipelineArtifactsBucket"
+                                },
+                                "code"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    ],
+                    "ProcessingOutputConfig": {
+                      "Outputs": [
+                        {
+                          "OutputName": "drift-metrics",
+                          "S3Output": {
+                            "LocalPath": "/opt/ml/processing/output/metrics",
+                            "S3UploadMode": "EndOfJob",
+                            "S3Uri": {
+                              "Std:Join": {
+                                "On": "/",
+                                "Values": [
+                                  "s3:/",
+                                  {
+                                    "Get": "Parameters.PipelineArtifactsBucket"
+                                  },
+                                  "white-castle",
+                                  "drift"
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "ProcessingResources": {
+                      "ClusterConfig": {
+                        "InstanceCount": 1,
+                        "InstanceType": {
+                          "Get": "Parameters.ProcessingInstanceType"
+                        },
+                        "VolumeSizeInGB": 30
+                      }
+                    },
+                    "RoleArn": {
+                      "Get": "Parameters.SageMakerRoleArn"
+                    }
+                  },
+                  "Name": "DetectDrift",
+                  "PropertyFiles": [
+                    {
+                      "OutputName": "drift-metrics",
+                      "Path": "metrics.json",
+                      "PropertyFileName": "DriftMetrics"
+                    }
+                  ],
+                  "Type": "Processing"
+                },
+                {
+                  "Arguments": {
+                    "Conditions": [
+                      {
+                        "LeftValue": {
+                          "Std:JsonGet": {
+                            "Path": "confidence",
+                            "PropertyFile": {
+                              "Get": "Steps.DetectDrift.PropertyFiles.DriftMetrics"
+                            }
+                          }
+                        },
+                        "RightValue": {
+                          "Get": "Parameters.Level1ConfidenceFloor"
+                        },
+                        "Type": "ConditionGreaterThanOrEqualTo"
+                      },
+                      {
+                        "LeftValue": {
+                          "Std:JsonGet": {
+                            "Path": "correction_rate_multiplier",
+                            "PropertyFile": {
+                              "Get": "Steps.DetectDrift.PropertyFiles.DriftMetrics"
+                            }
+                          }
+                        },
+                        "RightValue": {
+                          "Get": "Parameters.CorrectionRateMultiplier"
+                        },
+                        "Type": "ConditionLessThanOrEqualTo"
+                      }
+                    ],
+                    "ElseSteps": [
+                      {
+                        "Arguments": {
+                          "ErrorMessage": "Drift metrics exceed the configured confidence or correction-rate limits."
+                        },
+                        "Name": "FailDriftGate",
+                        "Type": "Fail"
+                      }
+                    ],
+                    "IfSteps": [
+                      {
+                        "Arguments": {
+                          "AlgorithmSpecification": {
+                            "ContainerEntrypoint": [
+                              "python3",
+                              "/opt/ml/input/data/code/train.py"
+                            ],
+                            "TrainingImage": "433757028032.dkr.ecr.us-west-2.amazonaws.com/xgboost:1.7-1",
+                            "TrainingInputMode": "File"
+                          },
+                          "CheckpointConfig": {
+                            "S3Uri": {
+                              "Std:Join": {
+                                "On": "/",
+                                "Values": [
+                                  "s3:/",
+                                  {
+                                    "Get": "Parameters.ModelArtifactsBucket"
+                                  },
+                                  "white-castle",
+                                  "checkpoints"
+                                ]
+                              }
+                            }
+                          },
+                          "EnableManagedSpotTraining": {
+                            "Get": "Parameters.UseSpot"
+                          },
+                          "HyperParameters": {
+                            "batch_size": {
+                              "Get": "Parameters.BatchSize"
+                            },
+                            "checkpoint_every_epochs": {
+                              "Get": "Parameters.CheckpointEveryEpochs"
+                            },
+                            "classifier": {
+                              "Get": "Parameters.Classifier"
+                            },
+                            "epochs": {
+                              "Get": "Parameters.Epochs"
+                            },
+                            "image_size": {
+                              "Get": "Parameters.ImageSize"
+                            },
+                            "learning_rate": {
+                              "Get": "Parameters.LearningRate"
+                            },
+                            "seed": {
+                              "Get": "Parameters.Seed"
+                            }
+                          },
+                          "InputDataConfig": [
+                            {
+                              "ChannelName": "training",
+                              "DataSource": {
+                                "S3DataSource": {
+                                  "S3DataDistributionType": "FullyReplicated",
+                                  "S3DataType": "S3Prefix",
+                                  "S3Uri": {
+                                    "Std:Join": {
+                                      "On": "/",
+                                      "Values": [
+                                        "s3:/",
+                                        {
+                                          "Get": "Parameters.TrainingBucket"
+                                        },
+                                        "white-castle",
+                                        "quality"
+                                      ]
+                                    }
+                                  }
+                                }
+                              }
+                            },
+                            {
+                              "ChannelName": "code",
+                              "DataSource": {
+                                "S3DataSource": {
+                                  "S3DataDistributionType": "FullyReplicated",
+                                  "S3DataType": "S3Prefix",
+                                  "S3Uri": {
+                                    "Std:Join": {
+                                      "On": "/",
+                                      "Values": [
+                                        "s3:/",
+                                        {
+                                          "Get": "Parameters.PipelineArtifactsBucket"
+                                        },
+                                        "code"
+                                      ]
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          ],
+                          "OutputDataConfig": {
+                            "S3OutputPath": {
+                              "Std:Join": {
+                                "On": "/",
+                                "Values": [
+                                  "s3:/",
+                                  {
+                                    "Get": "Parameters.ModelArtifactsBucket"
+                                  },
+                                  "white-castle"
+                                ]
+                              }
+                            }
+                          },
+                          "ResourceConfig": {
+                            "InstanceCount": 1,
+                            "InstanceType": {
+                              "Get": "Parameters.TrainingInstanceType"
+                            },
+                            "VolumeSizeInGB": 50
+                          },
+                          "RoleArn": {
+                            "Get": "Parameters.SageMakerRoleArn"
+                          },
+                          "StoppingCondition": {
+                            "MaxRuntimeInSeconds": 86400,
+                            "MaxWaitTimeInSeconds": 172800
+                          },
+                          "Tags": [
+                            {
+                              "Key": "brand",
+                              "Value": {
+                                "Get": "Parameters.BrandId"
+                              }
+                            }
+                          ]
+                        },
+                        "Name": "TrainBrandClassifier",
+                        "Type": "Training"
+                      },
+                      {
+                        "Arguments": {
+                          "AppSpecification": {
+                            "ContainerEntrypoint": [
+                              "python3",
+                              "/opt/ml/processing/input/code/evaluation.py"
+                            ],
+                            "ImageUri": "683313688378.dkr.ecr.us-west-2.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3"
+                          },
+                          "Environment": {
+                            "ACCURACY_THRESHOLD": {
+                              "Get": "Parameters.AccuracyThreshold"
+                            },
+                            "FP_RATE_EMERGENCY_THRESHOLD": {
+                              "Get": "Parameters.FpRateEmergencyThreshold"
+                            },
+                            "LATENCY_BUDGET_MS": {
+                              "Get": "Parameters.LatencyBudgetMs"
+                            }
+                          },
+                          "ProcessingInputs": [
+                            {
+                              "InputName": "model-artifacts",
+                              "S3Input": {
+                                "LocalPath": "/opt/ml/processing/input/model",
+                                "S3DataType": "S3Prefix",
+                                "S3InputMode": "File",
+                                "S3Uri": {
+                                  "Std:Join": {
+                                    "On": "/",
+                                    "Values": [
+                                      "s3:/",
+                                      {
+                                        "Get": "Parameters.ModelArtifactsBucket"
+                                      },
+                                      "white-castle"
+                                    ]
+                                  }
+                                }
+                              }
+                            },
+                            {
+                              "InputName": "pipeline-code",
+                              "S3Input": {
+                                "LocalPath": "/opt/ml/processing/input/code",
+                                "S3DataType": "S3Prefix",
+                                "S3InputMode": "File",
+                                "S3Uri": {
+                                  "Std:Join": {
+                                    "On": "/",
+                                    "Values": [
+                                      "s3:/",
+                                      {
+                                        "Get": "Parameters.PipelineArtifactsBucket"
+                                      },
+                                      "code"
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          ],
+                          "ProcessingOutputConfig": {
+                            "Outputs": [
+                              {
+                                "OutputName": "evaluation-metrics",
+                                "S3Output": {
+                                  "LocalPath": "/opt/ml/processing/output/metrics",
+                                  "S3UploadMode": "EndOfJob",
+                                  "S3Uri": {
+                                    "Std:Join": {
+                                      "On": "/",
+                                      "Values": [
+                                        "s3:/",
+                                        {
+                                          "Get": "Parameters.PipelineArtifactsBucket"
+                                        },
+                                        "white-castle",
+                                        "evaluation"
+                                      ]
+                                    }
+                                  }
+                                }
+                              }
+                            ]
+                          },
+                          "ProcessingResources": {
+                            "ClusterConfig": {
+                              "InstanceCount": 1,
+                              "InstanceType": {
+                                "Get": "Parameters.ProcessingInstanceType"
+                              },
+                              "VolumeSizeInGB": 30
+                            }
+                          },
+                          "RoleArn": {
+                            "Get": "Parameters.SageMakerRoleArn"
+                          }
+                        },
+                        "Name": "EvaluateModel",
+                        "PropertyFiles": [
+                          {
+                            "OutputName": "evaluation-metrics",
+                            "Path": "metrics.json",
+                            "PropertyFileName": "EvaluationMetrics"
+                          }
+                        ],
+                        "Type": "Processing"
+                      },
+                      {
+                        "Arguments": {
+                          "Conditions": [
+                            {
+                              "LeftValue": {
+                                "Std:JsonGet": {
+                                  "Path": "accuracy",
+                                  "PropertyFile": {
+                                    "Get": "Steps.EvaluateModel.PropertyFiles.EvaluationMetrics"
+                                  }
+                                }
+                              },
+                              "RightValue": {
+                                "Get": "Parameters.AccuracyThreshold"
+                              },
+                              "Type": "ConditionGreaterThanOrEqualTo"
+                            },
+                            {
+                              "LeftValue": {
+                                "Std:JsonGet": {
+                                  "Path": "emergency_false_positive_rate",
+                                  "PropertyFile": {
+                                    "Get": "Steps.EvaluateModel.PropertyFiles.EvaluationMetrics"
+                                  }
+                                }
+                              },
+                              "RightValue": {
+                                "Get": "Parameters.FpRateEmergencyThreshold"
+                              },
+                              "Type": "ConditionLessThanOrEqualTo"
+                            },
+                            {
+                              "LeftValue": {
+                                "Std:JsonGet": {
+                                  "Path": "latency_ms",
+                                  "PropertyFile": {
+                                    "Get": "Steps.EvaluateModel.PropertyFiles.EvaluationMetrics"
+                                  }
+                                }
+                              },
+                              "RightValue": {
+                                "Get": "Parameters.LatencyBudgetMs"
+                              },
+                              "Type": "ConditionLessThanOrEqualTo"
+                            }
+                          ],
+                          "ElseSteps": [
+                            {
+                              "Arguments": {
+                                "ErrorMessage": "Accuracy, emergency false-positive rate, or latency gate failed."
+                              },
+                              "Name": "FailEvaluationGate",
+                              "Type": "Fail"
+                            }
+                          ],
+                          "IfSteps": [
+                            {
+                              "Arguments": {
+                                "CustomerMetadataProperties": {
+                                  "brand_id": {
+                                    "Get": "Parameters.BrandId"
+                                  },
+                                  "ml_lead_topic_arn": {
+                                    "Get": "Parameters.MlLeadTopicArn"
+                                  },
+                                  "review_topic_arn": {
+                                    "Get": "Parameters.ReviewTopicArn"
+                                  },
+                                  "vp_engineering_topic_arn": {
+                                    "Get": "Parameters.VpEngineeringTopicArn"
+                                  }
+                                },
+                                "InferenceSpecification": {
+                                  "Containers": [
+                                    {
+                                      "Image": "433757028032.dkr.ecr.us-west-2.amazonaws.com/xgboost:1.7-1",
+                                      "ModelDataUrl": {
+                                        "Get": "Steps.TrainBrandClassifier.ModelArtifacts.S3ModelArtifacts"
+                                      }
+                                    }
+                                  ],
+                                  "SupportedContentTypes": [
+                                    "application/json"
+                                  ],
+                                  "SupportedRealtimeInferenceInstanceTypes": [
+                                    "ml.m5.large"
+                                  ],
+                                  "SupportedResponseMIMETypes": [
+                                    "application/json"
+                                  ],
+                                  "SupportedTransformInstanceTypes": [
+                                    "ml.m5.large"
+                                  ]
+                                },
+                                "ModelApprovalStatus": "PendingManualApproval",
+                                "ModelMetrics": {
+                                  "ModelQuality": {
+                                    "Statistics": {
+                                      "ContentType": "application/json",
+                                      "S3Uri": {
+                                        "Std:Join": {
+                                          "On": "/",
+                                          "Values": [
+                                            "s3:/",
+                                            {
+                                              "Get": "Parameters.PipelineArtifactsBucket"
+                                            },
+                                            "white-castle",
+                                            "evaluation",
+                                            "metrics.json"
+                                          ]
+                                        }
+                                      }
+                                    }
+                                  }
+                                },
+                                "ModelPackageGroupName": {
+                                  "Get": "Parameters.ModelPackageGroup"
+                                }
+                              },
+                              "Name": "RegisterModelPendingManualApproval",
+                              "Type": "RegisterModel"
+                            }
+                          ]
+                        },
+                        "Name": "EvaluateModelQualityGate",
+                        "Type": "Condition"
+                      }
+                    ]
+                  },
+                  "Name": "DriftGate",
+                  "Type": "Condition"
+                }
+              ]
+            },
+            "Name": "CleanlabQualityGate",
+            "Type": "Condition"
+          }
+        ]
+      },
+      "Name": "DatasetBoundsGate",
+      "Type": "Condition"
+    }
+  ],
+  "Version": "2020-12-01"
+}
