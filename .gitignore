@@ -27,5 +27,14 @@ local_run/
 scratch/
 *.log
 
+# Image data (do not commit raw datasets / sample images)
+tests/real_data/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.webp
+
 # OS
 .DS_Store
