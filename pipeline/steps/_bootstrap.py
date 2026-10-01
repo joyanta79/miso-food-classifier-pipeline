@@ -8,6 +8,7 @@ contained without a custom image build.
 
 Python 3.10 compatible.
 """
+
 from __future__ import annotations
 
 import importlib

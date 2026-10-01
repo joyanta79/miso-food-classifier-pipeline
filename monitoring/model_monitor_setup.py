@@ -77,7 +77,9 @@ class ModelMonitorSetup:
         elif hasattr(correction_db, "query_correction_rate"):
             correction_rate = correction_db.query_correction_rate(brand_id)
         else:
-            raise TypeError("correction_db must expose get_correction_rate or query_correction_rate")
+            raise TypeError(
+                "correction_db must expose get_correction_rate or query_correction_rate"
+            )
         return self.assess_drift(confidence, float(correction_rate), baseline_correction_rate)
 
     def model_quality_job_definition(

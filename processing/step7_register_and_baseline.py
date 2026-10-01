@@ -134,7 +134,8 @@ def register_and_baseline(
             "manual_approval_required": "true",
         },
         Description=(
-            f"{brand_id} candidate; quality gate={quality_gate}; requires manual approval before deployment."
+            f"{brand_id} candidate; quality gate={quality_gate}; "
+            f"requires manual approval before deployment."
         ),
     )
     model_package_arn = response["ModelPackageArn"]
@@ -157,7 +158,9 @@ def register_and_baseline(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Register a model candidate and request manual approval.")
+    parser = argparse.ArgumentParser(
+        description="Register a model candidate and request manual approval."
+    )
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--brand-id", required=True)
     parser.add_argument("--model-data-s3-uri", required=True)
@@ -166,7 +169,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--evaluation-report", default=str(DEFAULT_INPUT_DIR / "evaluation.json"))
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--event-bus-name", default="default")
-    parser.add_argument("--dry-run", action="store_true", help="Write a local registration plan without AWS calls.")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Write a local registration plan without AWS calls."
+    )
     return parser.parse_args()
 
 
@@ -180,7 +185,9 @@ def main(args: argparse.Namespace) -> dict[str, Any]:
     if dry_run:
         group_name = model_group_for_brand(config, args.brand_id)
         baseline = build_baseline_statistics(evaluation, args.brand_id)
-        (output_dir / "baseline_statistics.json").write_text(json.dumps(baseline, indent=2), encoding="utf-8")
+        (output_dir / "baseline_statistics.json").write_text(
+            json.dumps(baseline, indent=2), encoding="utf-8"
+        )
         model_package_arn = f"local://sagemaker/model-package/{group_name}/candidate"
         result = {
             "dry_run": True,

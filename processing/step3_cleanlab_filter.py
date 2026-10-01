@@ -1,4 +1,5 @@
 """Step 3: identify likely annotation issues from OOS probabilities."""
+
 from __future__ import annotations
 
 import argparse
@@ -80,12 +81,21 @@ def filter_label_issues(
 
 
 def write_outputs(
-    flagged: list[dict[str, Any]], cleaned: list[dict[str, Any]], report: dict[str, float | int], output_dir: str | Path
+    flagged: list[dict[str, Any]],
+    cleaned: list[dict[str, Any]],
+    report: dict[str, float | int],
+    output_dir: str | Path,
 ) -> None:
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    for name, payload in (("flagged_images.json", flagged), ("cleaned_dataset.json", cleaned), ("cleanlab_report.json", report)):
-        (directory / name).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    for name, payload in (
+        ("flagged_images.json", flagged),
+        ("cleaned_dataset.json", cleaned),
+        ("cleanlab_report.json", report),
+    ):
+        (directory / name).write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
 
 
 def main() -> None:

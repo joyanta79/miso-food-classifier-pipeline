@@ -19,3 +19,20 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+# UP017 wants datetime.UTC, but SageMaker DLC containers run Python 3.10 where
+# that name does not exist. These modules deliberately use a
+# `UTC = timezone.utc` shim for 3.10 compatibility, which also forces the
+# shim assignment ahead of later imports (E402). Both are intentional.
+ignore = ["UP017"]
+
+[tool.ruff.lint.per-file-ignores]
+# Files using the Python 3.10 UTC compatibility shim (import ordering is
+# intentional so UTC is defined before downstream imports run).
+"processing/step0_data_selection.py" = ["E402"]
+"processing/step7_register_and_baseline.py" = ["E402"]
+"scripts/sm_clean_runner.py" = ["E402"]
+# These step entrypoints bootstrap-install deps before importing them, so the
+# imports intentionally follow the bootstrap call.
+"pipeline/steps/drift_detection.py" = ["E402"]
+"pipeline/steps/evaluation.py" = ["E402"]
+"pipeline/export_definition.py" = ["E402"]

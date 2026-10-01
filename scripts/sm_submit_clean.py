@@ -4,10 +4,10 @@ Real cloud run on real images using the TensorFlow 2.14 CPU DLC (real
 EfficientNetV2 backbone). Uploads the runner + code, launches the job, and
 prints the job name so a poller can follow it.
 """
+
 from __future__ import annotations
 
 import os
-import sys
 import time
 
 import boto3

@@ -90,7 +90,9 @@ class DataSyncTask:
         )
         return source["LocationArn"], destination["LocationArn"]
 
-    def task_request(self, source_location_arn: str, destination_location_arn: str) -> dict[str, Any]:
+    def task_request(
+        self, source_location_arn: str, destination_location_arn: str
+    ) -> dict[str, Any]:
         """Build a transfer request with DataSync verification enabled."""
         return {
             "SourceLocationArn": source_location_arn,
@@ -135,15 +137,15 @@ class DataSyncTask:
         for item in objects:
             source_key = item["source_key"]
             destination_key = item.get("destination_key", source_key)
-            source_head = source_s3_client.head_object(
-                Bucket=item["source_bucket"], Key=source_key
-            )
+            source_head = source_s3_client.head_object(Bucket=item["source_bucket"], Key=source_key)
             destination_head = destination_s3_client.head_object(
                 Bucket=item["destination_bucket"], Key=destination_key
             )
             source_algorithm, source_value = self._checksum(source_head)
             destination_algorithm, destination_value = self._checksum(destination_head)
-            matched = source_algorithm == destination_algorithm and source_value == destination_value
+            matched = (
+                source_algorithm == destination_algorithm and source_value == destination_value
+            )
             result = ChecksumResult(source_key, destination_key, source_algorithm, matched)
             results.append(result)
             if not matched:

@@ -45,7 +45,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sdk",
         action="store_true",
-        help="Use the optional SageMaker SDK to emit its native definition instead of local dry-run JSON.",
+        help=(
+            "Use the optional SageMaker SDK to emit its native definition "
+            "instead of local dry-run JSON."
+        ),
     )
     return parser.parse_args()
 

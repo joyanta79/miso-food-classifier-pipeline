@@ -53,7 +53,9 @@ def test_dry_run_parameters_match_all_configured_gates() -> None:
     assert parameters["RecencyMonths"] == config["data_selection"]["recency_months"]
     assert parameters["CosineDedupThreshold"] == config["embedding"]["cosine_dedup_threshold"]
     assert parameters["KFoldCount"] == config["kfold"]["n_folds"]
-    assert parameters["CleanlabFlagThresholdFraction"] == config["cleanlab"]["flag_threshold_fraction"]
+    assert (
+        parameters["CleanlabFlagThresholdFraction"] == config["cleanlab"]["flag_threshold_fraction"]
+    )
     assert parameters["UseSpot"] is config["training"]["use_spot"]
     assert parameters["AccuracyThreshold"] == config["evaluation"]["accuracy_threshold"]
     assert parameters["CorrectionRateMultiplier"] == config["drift"]["correction_rate_multiplier"]

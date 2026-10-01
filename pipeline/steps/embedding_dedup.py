@@ -7,6 +7,7 @@ writes embeddings.npy + embedding_mapping.json for the quality step.
 
 Python 3.10 compatible.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,7 +31,9 @@ from processing.step1_extract_embeddings import extract_embeddings, write_output
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="EmbedAndDeduplicate step")
-    parser.add_argument("--manifest", default="/opt/ml/processing/input/dataset/curated_manifest.json")
+    parser.add_argument(
+        "--manifest", default="/opt/ml/processing/input/dataset/curated_manifest.json"
+    )
     parser.add_argument("--images", default="/opt/ml/processing/input/images")
     parser.add_argument("--output-dir", default="/opt/ml/processing/output/dataset")
     args = parser.parse_args()
@@ -53,8 +56,10 @@ def main() -> None:
     )
     write_outputs(embeddings, mapping, args.output_dir)
     backends = {record.get("embedding_backend") for record in mapping}
-    print(f"[embedding_dedup] embeddings={np.asarray(embeddings).shape} "
-          f"kept={len(mapping)} backends={backends}")
+    print(
+        f"[embedding_dedup] embeddings={np.asarray(embeddings).shape} "
+        f"kept={len(mapping)} backends={backends}"
+    )
 
 
 if __name__ == "__main__":

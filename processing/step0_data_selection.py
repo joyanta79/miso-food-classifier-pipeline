@@ -3,6 +3,7 @@
 The module is deliberately S3-client agnostic so it can be exercised locally from a
 JSON inventory and reused by a SageMaker Processing job after inventory export.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -17,9 +18,7 @@ UTC = timezone.utc
 from pathlib import Path
 from typing import Any
 
-_METADATA_PATTERN = re.compile(
-    r"^(?P<brand>[^_]+)_(?P<label>.+)_(?P<confidence>\d+(?:\.\d+)?)$"
-)
+_METADATA_PATTERN = re.compile(r"^(?P<brand>[^_]+)_(?P<label>.+)_(?P<confidence>\d+(?:\.\d+)?)$")
 
 
 def parse_filename_metadata(key: str) -> tuple[str, str, float]:
@@ -54,7 +53,11 @@ def select_data(
     Records require ``key`` and ``last_modified``. Labels and confidence are parsed
     from the filename rather than trusted from an external annotation field.
     """
-    if min_images_per_class < 1 or target_dataset_min < 1 or target_dataset_max < target_dataset_min:
+    if (
+        min_images_per_class < 1
+        or target_dataset_min < 1
+        or target_dataset_max < target_dataset_min
+    ):
         raise ValueError("Invalid dataset-size bounds")
     reference_time = (now or datetime.now(UTC)).astimezone(UTC)
     # A fixed 30-day month keeps local and Processing-job selection deterministic.
@@ -85,7 +88,8 @@ def select_data(
     curated = [item for item in selected if item["label"] in eligible_labels]
     if len(curated) < target_dataset_min:
         raise ValueError(
-            f"Curated dataset has {len(curated)} images, below required minimum {target_dataset_min}"
+            f"Curated dataset has {len(curated)} images, "
+            f"below required minimum {target_dataset_min}"
         )
     return curated[:target_dataset_max]
 
@@ -97,7 +101,9 @@ def write_manifest(records: list[dict[str, Any]], output_path: str | Path) -> No
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Create a curated brand manifest from a JSON inventory")
+    parser = argparse.ArgumentParser(
+        description="Create a curated brand manifest from a JSON inventory"
+    )
     parser.add_argument("--input", default="/opt/ml/processing/input/inventory.json")
     parser.add_argument("--output", default="/opt/ml/processing/output/curated_manifest.json")
     parser.add_argument("--naming-pattern", required=True)

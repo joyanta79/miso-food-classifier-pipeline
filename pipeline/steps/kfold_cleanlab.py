@@ -11,6 +11,7 @@ flagged_images.json and cleanlab_report.json for inspection.
 
 Python 3.10 compatible.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -24,12 +25,14 @@ sys.path.insert(0, "/opt/ml/processing/input/pkgcode/pipeline/steps")
 
 import _bootstrap  # noqa: E402
 
-_bootstrap.ensure({
-    "numpy": "numpy",
-    "sklearn": "scikit-learn",
-    "xgboost": "xgboost",
-    "cleanlab": "cleanlab",
-})
+_bootstrap.ensure(
+    {
+        "numpy": "numpy",
+        "sklearn": "scikit-learn",
+        "xgboost": "xgboost",
+        "cleanlab": "cleanlab",
+    }
+)
 
 import numpy as np  # noqa: E402
 
@@ -40,7 +43,9 @@ from processing.step3_cleanlab_filter import filter_label_issues  # noqa: E402
 def main() -> None:
     parser = argparse.ArgumentParser(description="KFoldCleanlabQuality step")
     parser.add_argument("--embeddings", default="/opt/ml/processing/input/dataset/embeddings.npy")
-    parser.add_argument("--mapping", default="/opt/ml/processing/input/dataset/embedding_mapping.json")
+    parser.add_argument(
+        "--mapping", default="/opt/ml/processing/input/dataset/embedding_mapping.json"
+    )
     parser.add_argument("--dataset-out", default="/opt/ml/processing/output/dataset")
     parser.add_argument("--metrics-out", default="/opt/ml/processing/output/metrics")
     args = parser.parse_args()
@@ -76,9 +81,11 @@ def main() -> None:
     (metrics_out / "cleanlab_report.json").write_text(
         json.dumps(report, indent=2) + "\n", encoding="utf-8"
     )
-    print(f"[kfold_cleanlab] classes={classes} flagged={report['flagged_images']}/"
-          f"{report['total_images']} flagged_fraction={report['flagged_fraction']:.3f} "
-          f"cleaned={len(cleaned)}")
+    print(
+        f"[kfold_cleanlab] classes={classes} flagged={report['flagged_images']}/"
+        f"{report['total_images']} flagged_fraction={report['flagged_fraction']:.3f} "
+        f"cleaned={len(cleaned)}"
+    )
 
 
 if __name__ == "__main__":

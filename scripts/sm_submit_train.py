@@ -4,6 +4,7 @@ Uses the TensorFlow 2.14 CPU DLC with a custom entrypoint. Delivers the flat
 images (train channel) and the code (code channel), runs a few epochs, and
 saves the model to the output S3 path.
 """
+
 from __future__ import annotations
 
 import os

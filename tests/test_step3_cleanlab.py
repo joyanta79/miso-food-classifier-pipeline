@@ -3,9 +3,7 @@ from tests.synthetic_data.generator import mislabeled_probabilities
 
 
 def test_cleanlab_filter_recalls_at_least_eighty_percent_of_injected_mislabels() -> None:
-    probabilities, mapping, classes, injected_ids = mislabeled_probabilities(
-        injected_mislabels=10
-    )
+    probabilities, mapping, classes, injected_ids = mislabeled_probabilities(injected_mislabels=10)
 
     flagged, cleaned, report = filter_label_issues(
         probabilities, mapping, classes, flag_threshold_fraction=0.25
