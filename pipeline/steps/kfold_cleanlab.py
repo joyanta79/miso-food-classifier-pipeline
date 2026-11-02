@@ -73,6 +73,14 @@ def main() -> None:
     (dataset_out / "flagged_images.json").write_text(
         json.dumps(flagged, indent=2) + "\n", encoding="utf-8"
     )
+    # Persist the K-fold out-of-sample probability matrix so the downstream
+    # DetectDrift step (which mounts this prefix at /opt/ml/processing/input/
+    # dataset) can read it and compute a real mean prediction confidence. The
+    # classes list goes with it so the artifact is self-describing.
+    np.save(dataset_out / "pred_probs.npy", probabilities)
+    (dataset_out / "classes.json").write_text(
+        json.dumps(classes, indent=2) + "\n", encoding="utf-8"
+    )
 
     metrics_out = Path(args.metrics_out)
     metrics_out.mkdir(parents=True, exist_ok=True)

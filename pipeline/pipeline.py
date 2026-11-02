@@ -58,7 +58,55 @@ def load_config(config_path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]
         raise ValueError(f"config.yaml is missing required sections: {sorted(missing)}")
     if not config["brands"]:
         raise ValueError("config.yaml must define at least one brand")
+    _validate_drift_config(config["drift"])
     return config
+
+
+def _validate_drift_config(drift: Mapping[str, Any]) -> None:
+    """Ensure the drift thresholds the gate relies on form a coherent band.
+
+    The pipeline exposes ``ConfidenceBaseline`` as an operator-overridable
+    pipeline parameter, so a bare ``float(...)`` at the use-site is not
+    enough: a baseline outside ``[0, 1]`` or below the gate's floor would
+    silently disable the gate. Reject that at definition-build time.
+    """
+    required_probability_keys = (
+        "confidence_baseline",
+        "level1_confidence_floor",
+        "level2_confidence_threshold",
+    )
+    parsed: dict[str, float] = {}
+    for key in required_probability_keys:
+        if key not in drift:
+            raise ValueError(f"config.yaml drift section missing {key!r}")
+        try:
+            value = float(drift[key])
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"drift.{key} must be numeric, got {drift[key]!r}") from error
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"drift.{key} must be in [0, 1], got {value!r}")
+        parsed[key] = value
+    if "correction_rate_multiplier" not in drift:
+        raise ValueError("config.yaml drift section missing 'correction_rate_multiplier'")
+    try:
+        multiplier = float(drift["correction_rate_multiplier"])
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"drift.correction_rate_multiplier must be numeric, got "
+            f"{drift['correction_rate_multiplier']!r}"
+        ) from error
+    if not multiplier > 0.0:
+        raise ValueError(
+            f"drift.correction_rate_multiplier must be a positive float, got {multiplier!r}"
+        )
+    if parsed["confidence_baseline"] < parsed["level1_confidence_floor"]:
+        raise ValueError(
+            "drift.confidence_baseline must be >= drift.level1_confidence_floor"
+        )
+    if parsed["level2_confidence_threshold"] < parsed["level1_confidence_floor"]:
+        raise ValueError(
+            "drift.level2_confidence_threshold must be >= drift.level1_confidence_floor"
+        )
 
 
 def get_brand(config: Mapping[str, Any], brand_id: str) -> Brand:
