@@ -101,7 +101,7 @@ def test_eventbridge_trigger_starts_brand_pipeline(config: dict[str, Any]) -> No
     assert result["brand_id"] == "brand-b"
     assert sagemaker.calls == [
         {
-            "PipelineName": "MisoFoodClassifierPipeline",
+            "PipelineName": "miso-food-classifier-brand-b",
             "PipelineParameters": [
                 {"Name": "BrandId", "Value": "brand-b"},
                 {"Name": "TriggerSource", "Value": "s3"},
@@ -109,6 +109,41 @@ def test_eventbridge_trigger_starts_brand_pipeline(config: dict[str, Any]) -> No
             ],
         }
     ]
+
+
+def test_eventbridge_trigger_ignores_caller_pipeline_name(
+    config: dict[str, Any],
+) -> None:
+    sagemaker = SageMakerMock()
+    eventbridge_trigger_handler(
+        {
+            "detail": {
+                "brand_id": "white-castle",
+                "pipeline_name": "attacker-chosen",
+                "trigger": "s3",
+            }
+        },
+        None,
+        sagemaker_client=sagemaker,
+        config=config,
+    )
+
+    assert sagemaker.calls[0]["PipelineName"] == "miso-food-classifier-white-castle"
+
+
+def test_eventbridge_trigger_uses_custom_prefix_env(
+    config: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MISO_PIPELINE_NAME_PREFIX", "tenant-pipelines")
+    sagemaker = SageMakerMock()
+    eventbridge_trigger_handler(
+        {"detail": {"brand_id": "brand-b", "trigger": "s3"}},
+        None,
+        sagemaker_client=sagemaker,
+        config=config,
+    )
+
+    assert sagemaker.calls[0]["PipelineName"] == "tenant-pipelines-brand-b"
 
 
 def test_manual_trigger_accepts_json_body(config: dict[str, Any]) -> None:
@@ -121,10 +156,30 @@ def test_manual_trigger_accepts_json_body(config: dict[str, Any]) -> None:
     )
 
     assert result["trigger"] == "manual"
+    assert sagemaker.calls[0]["PipelineName"] == "miso-food-classifier-white-castle"
     assert sagemaker.calls[0]["PipelineParameters"][1] == {
         "Name": "TriggerSource",
         "Value": "manual",
     }
+
+
+def test_manual_trigger_rejects_unknown_fields(config: dict[str, Any]) -> None:
+    sagemaker = SageMakerMock()
+    with pytest.raises(ValueError, match="Unexpected field"):
+        manual_trigger_handler(
+            {
+                "body": json.dumps(
+                    {
+                        "brand_id": "white-castle",
+                        "pipeline_name": "attacker-chosen",
+                    }
+                )
+            },
+            None,
+            sagemaker_client=sagemaker,
+            config=config,
+        )
+    assert sagemaker.calls == []
 
 
 def test_manual_trigger_rejects_unknown_brand(config: dict[str, Any]) -> None:

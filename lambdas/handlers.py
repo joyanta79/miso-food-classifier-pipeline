@@ -16,6 +16,17 @@ import yaml
 
 _CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
 
+# Default prefix for the per-brand SageMaker pipelines deployed by infra/main.tf
+# (``aws_sagemaker_pipeline.brand`` names each pipeline
+# ``${var.pipeline_name_prefix}-${brand_id}``, with ``miso-food-classifier`` as
+# the default prefix).
+_DEFAULT_PIPELINE_NAME_PREFIX = "miso-food-classifier"
+
+# Fields a caller may supply to ``manual_trigger_handler``. Anything else is
+# rejected so attacker-controlled keys (notably ``pipeline_name``) cannot flow
+# through the mass-assigned forwarded detail into ``start_pipeline_execution``.
+_MANUAL_TRIGGER_ALLOWED_FIELDS = frozenset({"brand_id"})
+
 
 def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
     """Load the shared project configuration without mutating it."""
@@ -108,6 +119,18 @@ def _pipeline_parameters(
     ]
 
 
+def _pipeline_name_for_brand(brand_id: str) -> str:
+    """Return the pipeline name owned by ``brand_id``.
+
+    The target is always derived server-side from the already-validated
+    ``brand_id`` and the deployment-controlled ``MISO_PIPELINE_NAME_PREFIX``
+    environment variable (default ``miso-food-classifier``) so a caller cannot
+    choose which tenant's pipeline runs.
+    """
+    prefix = os.environ.get("MISO_PIPELINE_NAME_PREFIX", _DEFAULT_PIPELINE_NAME_PREFIX)
+    return f"{prefix}-{brand_id}"
+
+
 def eventbridge_trigger_handler(
     event: dict[str, Any],
     _context: Any,
@@ -125,9 +148,10 @@ def eventbridge_trigger_handler(
     if brand_id not in {brand["id"] for brand in resolved_config["brands"]}:
         raise ValueError(f"Unknown brand_id: {brand_id!r}")
 
-    pipeline_name = detail.get(
-        "pipeline_name", os.environ.get("MISO_PIPELINE_NAME", "MisoFoodClassifierPipeline")
-    )
+    # Pipeline target is derived from the validated ``brand_id`` only. Any
+    # ``pipeline_name`` supplied by the caller is ignored to prevent a confused
+    # deputy against ``sagemaker:StartPipelineExecution``.
+    pipeline_name = _pipeline_name_for_brand(brand_id)
     response = _client("sagemaker", sagemaker_client).start_pipeline_execution(
         PipelineName=pipeline_name,
         PipelineParameters=_pipeline_parameters(
@@ -152,12 +176,25 @@ def manual_trigger_handler(
     body = event.get("body", event)
     if isinstance(body, str):
         body = json.loads(body)
+    if not isinstance(body, dict):
+        raise ValueError("manual training request body must be a JSON object")
+
+    # Reject unknown keys instead of splatting ``body`` into the forwarded
+    # detail. This prevents mass-assignment of control-plane fields such as
+    # ``pipeline_name`` through to ``start_pipeline_execution``.
+    unexpected = set(body) - _MANUAL_TRIGGER_ALLOWED_FIELDS
+    if unexpected:
+        raise ValueError(
+            "Unexpected field(s) in manual training request: "
+            + ", ".join(sorted(unexpected))
+        )
+
     brand_id = body.get("brand_id")
     if not brand_id:
         raise ValueError("brand_id is required for a manual training request")
 
     return eventbridge_trigger_handler(
-        {"detail": {**body, "brand_id": brand_id, "trigger": "manual"}},
+        {"detail": {"brand_id": brand_id, "trigger": "manual"}},
         context,
         sagemaker_client=sagemaker_client,
         config=config,
