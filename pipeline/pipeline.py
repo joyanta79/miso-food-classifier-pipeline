@@ -1065,7 +1065,15 @@ def build_sagemaker_pipeline(
                     step_name=drift_step.name, property_file=drift_report, json_path="confidence"
                 ),
                 right=config["drift"]["level1_confidence_floor"],
-            )
+            ),
+            ConditionLessThanOrEqualTo(
+                left=JsonGet(
+                    step_name=drift_step.name,
+                    property_file=drift_report,
+                    json_path="correction_rate_multiplier",
+                ),
+                right=config["drift"]["correction_rate_multiplier"],
+            ),
         ],
         if_steps=[training_step, evaluation_step, evaluation_gate],
         else_steps=[FailStep(name="FailDriftGate", error_message="Drift gate failed.")],
@@ -1097,7 +1105,23 @@ def build_sagemaker_pipeline(
                     json_path="dataset_size",
                 ),
                 right=config["data_selection"]["target_dataset_min"],
-            )
+            ),
+            ConditionLessThanOrEqualTo(
+                left=JsonGet(
+                    step_name=selection_step.name,
+                    property_file=selection_report,
+                    json_path="dataset_size",
+                ),
+                right=config["data_selection"]["target_dataset_max"],
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=selection_step.name,
+                    property_file=selection_report,
+                    json_path="minimum_class_count",
+                ),
+                right=config["data_selection"]["min_images_per_class"],
+            ),
         ],
         if_steps=[embeddings_step, quality_step, quality_gate],
         else_steps=[
@@ -1110,6 +1134,88 @@ def build_sagemaker_pipeline(
         steps=[selection_step, dataset_gate],
         sagemaker_session=session,
     )
+
+
+# Expected condition count per gate, keyed by step name. Both the local DAG and the
+# SDK-emitted definition must agree on this contract so the artifact actually
+# deployed enforces every safety floor declared in config.yaml.
+_EXPECTED_GATE_CONDITION_COUNTS: Mapping[str, int] = {
+    "DatasetBoundsGate": 3,
+    "CleanlabQualityGate": 1,
+    "DriftGate": 2,
+    "EvaluateModelQualityGate": 3,
+}
+
+
+def validate_sdk_pipeline_definition(definition: str | Mapping[str, Any]) -> None:
+    """Validate the SDK-emitted pipeline definition against the local DAG's contract.
+
+    The SDK builder has historically been maintained independently of
+    ``build_dry_run_definition`` and can silently omit gate conditions enforced by
+    the validated local DAG. This function parses the SDK ``Pipeline.definition()``
+    JSON (or an equivalent mapping) and asserts the same safety-critical
+    invariants ``validate_dry_run_definition`` enforces: required steps are
+    present, each gate carries the full set of ``ConditionStep`` conditions, and
+    the model registration remains ``PendingManualApproval``.
+    """
+    if isinstance(definition, str):
+        parsed = json.loads(definition)
+    else:
+        parsed = dict(definition)
+
+    steps = parsed.get("Steps", [])
+    flattened = _walk_steps(steps)
+    names = [step["Name"] for step in flattened]
+
+    required = {
+        "SelectRecentBrandData",
+        "DatasetBoundsGate",
+        "EmbedAndDeduplicate",
+        "KFoldCleanlabQuality",
+        "CleanlabQualityGate",
+        "DetectDrift",
+        "DriftGate",
+        "TrainBrandClassifier",
+        "EvaluateModel",
+        "EvaluateModelQualityGate",
+        "FailDatasetBounds",
+        "FailCleanlabQuality",
+        "FailDriftGate",
+        "FailEvaluationGate",
+    }
+    missing = required.difference(names)
+    if missing:
+        raise ValueError(f"SDK pipeline is missing required steps: {sorted(missing)}")
+
+    by_name = {step["Name"]: step for step in flattened}
+    for gate_name, expected_count in _EXPECTED_GATE_CONDITION_COUNTS.items():
+        gate = by_name.get(gate_name)
+        if gate is None:
+            raise ValueError(f"SDK pipeline is missing required gate: {gate_name}")
+        conditions = gate.get("Arguments", {}).get("Conditions", [])
+        if len(conditions) != expected_count:
+            raise ValueError(
+                f"SDK pipeline gate {gate_name!r} has {len(conditions)} condition(s); "
+                f"expected {expected_count} to match the validated local DAG"
+            )
+
+    register_step = next(
+        (
+            step
+            for step in flattened
+            if step.get("Type") == "RegisterModel"
+            or step.get("Name", "").startswith("RegisterModelPendingManualApproval")
+        ),
+        None,
+    )
+    if register_step is None:
+        raise ValueError("SDK pipeline is missing the RegisterModel step")
+    status = register_step.get("Arguments", {}).get("ModelApprovalStatus")
+    if status != "PendingManualApproval":
+        raise ValueError(
+            "SDK pipeline must register models as PendingManualApproval; "
+            f"found {status!r}"
+        )
 
 
 if __name__ == "__main__":
