@@ -174,6 +174,8 @@ def build(config: dict, code_prefix: str, images_uri: str) -> Pipeline:
                 "CLEANLAB_FLAG_THRESHOLD_FRACTION": str(
                     config["cleanlab"]["flag_threshold_fraction"]
                 ),
+                "TARGET_DATASET_MIN": str(sel["target_dataset_min"]),
+                "MIN_IMAGES_PER_CLASS": str(sel["min_images_per_class"]),
             }
         ).run(
             code=str(STEPS_DIR / "kfold_cleanlab.py"),
@@ -375,6 +377,22 @@ def build(config: dict, code_prefix: str, images_uri: str) -> Pipeline:
                     json_path="flagged_fraction",
                 ),
                 right=config["cleanlab"]["flag_threshold_fraction"],
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=quality_step.name,
+                    property_file=quality_metrics,
+                    json_path="cleaned_count",
+                ),
+                right=sel["target_dataset_min"],
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=quality_step.name,
+                    property_file=quality_metrics,
+                    json_path="minimum_class_count",
+                ),
+                right=sel["min_images_per_class"],
             ),
         ],
         if_steps=[drift_step, drift_gate],

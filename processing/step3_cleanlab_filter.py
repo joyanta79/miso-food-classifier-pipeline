@@ -35,7 +35,25 @@ def filter_label_issues(
     *,
     flag_threshold_fraction: float = 0.05,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, float | int]]:
-    """Return flagged records, clean records, and pipeline-gate report."""
+    """Return flagged records, clean records, and pipeline-gate report.
+
+    ``flag_threshold_fraction`` must be in ``(0, 1]``; it is validated here and
+    echoed into the report so downstream gates/steps that enforce the ceiling
+    receive the exact value this function used. Enforcement of the ceiling on
+    ``flagged_fraction`` is performed by the caller (the KFoldCleanlabQuality
+    step and the CleanlabQualityGate), which have the authority to fail the run;
+    this function remains a pure data-processing primitive.
+    """
+    try:
+        threshold = float(flag_threshold_fraction)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"flag_threshold_fraction must be numeric, got {flag_threshold_fraction!r}"
+        ) from error
+    if not (0.0 < threshold <= 1.0):
+        raise ValueError(
+            f"flag_threshold_fraction must satisfy 0 < value <= 1, got {threshold!r}"
+        )
     records = list(mapping)
     class_names = list(classes)
     probabilities = np.asarray(pred_probs, dtype=np.float64)
@@ -75,7 +93,7 @@ def filter_label_issues(
         "total_images": len(records),
         "flagged_images": len(flagged),
         "flagged_fraction": len(flagged) / len(records) if records else 0.0,
-        "flag_threshold_fraction": flag_threshold_fraction,
+        "flag_threshold_fraction": threshold,
     }
     return flagged, cleaned, report
 

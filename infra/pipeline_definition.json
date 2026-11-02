@@ -588,8 +588,14 @@
                 "KFOLD_COUNT": {
                   "Get": "Parameters.KFoldCount"
                 },
+                "MIN_IMAGES_PER_CLASS": {
+                  "Get": "Parameters.MinImagesPerClass"
+                },
                 "SEED": {
                   "Get": "Parameters.Seed"
+                },
+                "TARGET_DATASET_MIN": {
+                  "Get": "Parameters.TargetDatasetMin"
                 }
               },
               "ProcessingInputs": [
@@ -718,6 +724,34 @@
                     "Get": "Parameters.CleanlabFlagThresholdFraction"
                   },
                   "Type": "ConditionLessThanOrEqualTo"
+                },
+                {
+                  "LeftValue": {
+                    "Std:JsonGet": {
+                      "Path": "cleaned_count",
+                      "PropertyFile": {
+                        "Get": "Steps.KFoldCleanlabQuality.PropertyFiles.QualityMetrics"
+                      }
+                    }
+                  },
+                  "RightValue": {
+                    "Get": "Parameters.TargetDatasetMin"
+                  },
+                  "Type": "ConditionGreaterThanOrEqualTo"
+                },
+                {
+                  "LeftValue": {
+                    "Std:JsonGet": {
+                      "Path": "minimum_class_count",
+                      "PropertyFile": {
+                        "Get": "Steps.KFoldCleanlabQuality.PropertyFiles.QualityMetrics"
+                      }
+                    }
+                  },
+                  "RightValue": {
+                    "Get": "Parameters.MinImagesPerClass"
+                  },
+                  "Type": "ConditionGreaterThanOrEqualTo"
                 }
               ],
               "ElseSteps": [

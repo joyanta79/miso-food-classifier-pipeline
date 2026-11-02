@@ -419,6 +419,8 @@ def build_dry_run_definition(
             ("KFOLD_COUNT", "KFoldCount"),
             ("CLASSIFIER", "Classifier"),
             ("CLEANLAB_FLAG_THRESHOLD_FRACTION", "CleanlabFlagThresholdFraction"),
+            ("TARGET_DATASET_MIN", "TargetDatasetMin"),
+            ("MIN_IMAGES_PER_CLASS", "MinImagesPerClass"),
             ("SEED", "Seed"),
         ),
         [
@@ -691,7 +693,21 @@ def build_dry_run_definition(
                         "KFoldCleanlabQuality", "QualityMetrics", "flagged_fraction"
                     ),
                     "RightValue": _ref("CleanlabFlagThresholdFraction"),
-                }
+                },
+                {
+                    "Type": "ConditionGreaterThanOrEqualTo",
+                    "LeftValue": _step_ref(
+                        "KFoldCleanlabQuality", "QualityMetrics", "cleaned_count"
+                    ),
+                    "RightValue": _ref("TargetDatasetMin"),
+                },
+                {
+                    "Type": "ConditionGreaterThanOrEqualTo",
+                    "LeftValue": _step_ref(
+                        "KFoldCleanlabQuality", "QualityMetrics", "minimum_class_count"
+                    ),
+                    "RightValue": _ref("MinImagesPerClass"),
+                },
             ],
             "IfSteps": [detect_drift, drift_gate],
             "ElseSteps": [fail_cleanlab],
@@ -963,6 +979,8 @@ def build_sagemaker_pipeline(
             "KFOLD_COUNT": str(config["kfold"]["n_folds"]),
             "CLASSIFIER": config["kfold"]["classifier"],
             "CLEANLAB_FLAG_THRESHOLD_FRACTION": str(config["cleanlab"]["flag_threshold_fraction"]),
+            "TARGET_DATASET_MIN": str(config["data_selection"]["target_dataset_min"]),
+            "MIN_IMAGES_PER_CLASS": str(config["data_selection"]["min_images_per_class"]),
         },
         quality_report,
     )
@@ -1080,7 +1098,23 @@ def build_sagemaker_pipeline(
                     json_path="flagged_fraction",
                 ),
                 right=config["cleanlab"]["flag_threshold_fraction"],
-            )
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=quality_step.name,
+                    property_file=quality_report,
+                    json_path="cleaned_count",
+                ),
+                right=config["data_selection"]["target_dataset_min"],
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=quality_step.name,
+                    property_file=quality_report,
+                    json_path="minimum_class_count",
+                ),
+                right=config["data_selection"]["min_images_per_class"],
+            ),
         ],
         if_steps=[drift_step, drift_gate],
         else_steps=[
