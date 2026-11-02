@@ -307,7 +307,7 @@
                     {
                       "Get": "Parameters.RawArchiveBucket"
                     },
-                    ""
+                    "white-castle"
                   ]
                 }
               }

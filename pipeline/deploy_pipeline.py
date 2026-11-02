@@ -54,6 +54,15 @@ def load_config(path: str) -> dict:
 
 
 def build(config: dict, code_prefix: str, images_uri: str) -> Pipeline:
+    """Build the Miso SageMaker Pipeline for the first configured brand.
+
+    ``images_uri`` MUST point at this brand's dedicated raw-image prefix
+    (``s3://<raw-archive-bucket>/<brand.id>/``), not at the bucket root --
+    the step container only cross-checks the ``<brand>`` token in each
+    filename as defence in depth. Scope the upload credentials for the raw
+    archive to the same prefix (``s3:prefix`` IAM condition) to prevent
+    cross-brand data mixing (CWE-639).
+    """
     region = config["aws"]["region"]
     role = config["aws"]["sagemaker_role_arn"]
     bucket = config["s3"]["pipeline_artifacts_bucket"]
@@ -423,7 +432,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config.smoke.yaml")
     parser.add_argument("--code-prefix", default="code")
-    parser.add_argument("--images-uri", required=True)
+    parser.add_argument(
+        "--images-uri",
+        required=True,
+        help=(
+            "S3 URI of the raw-image prefix for this brand, e.g. "
+            "s3://<raw-archive-bucket>/<brand.id>/. Must be scoped to a "
+            "single brand -- do not pass the bucket root (CWE-639)."
+        ),
+    )
     parser.add_argument("--upsert", action="store_true")
     parser.add_argument("--run", action="store_true")
     args = parser.parse_args()
