@@ -105,7 +105,6 @@ def test_eventbridge_trigger_starts_brand_pipeline(config: dict[str, Any]) -> No
             "PipelineParameters": [
                 {"Name": "BrandId", "Value": "brand-b"},
                 {"Name": "TriggerSource", "Value": "s3"},
-                {"Name": "TrainingBucket", "Value": "training-bucket"},
             ],
         }
     ]

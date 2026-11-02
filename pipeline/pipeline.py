@@ -91,10 +91,30 @@ def _parameter(name: str, value: Any, description: str) -> dict[str, Any]:
     }
 
 
+# Infrastructure-identity names that MUST NOT be exposed as pipeline parameters.
+# These are deployment facts (role ARN, buckets the pipeline role is scoped to) --
+# not per-execution inputs. Baking them in as literals removes the
+# StartPipelineExecution code-channel / role-override hijack path (CWE-494).
+FORBIDDEN_PARAMETER_NAMES = frozenset(
+    {
+        "SageMakerRoleArn",
+        "TrainingBucket",
+        "ModelArtifactsBucket",
+        "PipelineArtifactsBucket",
+        "RawArchiveBucket",
+    }
+)
+
+
 def build_parameters(config: Mapping[str, Any], brand: Brand) -> list[dict[str, Any]]:
-    """Expose every configuration value used by the pipeline as an execution parameter."""
+    """Expose every configuration value used by the pipeline as an execution parameter.
+
+    The SageMaker execution role ARN and the four project bucket names are
+    deliberately omitted: they are baked into the definition as literals so a
+    caller with ``sagemaker:StartPipelineExecution`` cannot redirect the code
+    channel or the output locations by passing ``PipelineParameters``.
+    """
     aws = config["aws"]
-    s3 = config["s3"]
     selection = config["data_selection"]
     embedding = config["embedding"]
     kfold = config["kfold"]
@@ -108,19 +128,6 @@ def build_parameters(config: Mapping[str, Any], brand: Brand) -> list[dict[str, 
     values = [
         ("Region", aws["region"], "AWS Region hosting this pipeline."),
         ("AccountId", aws["account_id"], "Target AWS account identifier."),
-        ("SageMakerRoleArn", aws["sagemaker_role_arn"], "Execution role for SageMaker jobs."),
-        ("TrainingBucket", s3["training_bucket"], "S3 bucket for prepared training datasets."),
-        (
-            "ModelArtifactsBucket",
-            s3["model_artifacts_bucket"],
-            "S3 bucket for trained model artifacts and checkpoints.",
-        ),
-        (
-            "PipelineArtifactsBucket",
-            s3["pipeline_artifacts_bucket"],
-            "S3 bucket for pipeline outputs and container code contracts.",
-        ),
-        ("RawArchiveBucket", s3["raw_archive_bucket"], "S3 bucket containing raw image archives."),
         ("BrandId", brand.id, "Fixed pipeline brand identifier."),
         ("BrandNamingPattern", brand.naming_pattern, "Allowed raw-data filename prefix pattern."),
         (
@@ -214,7 +221,15 @@ def build_parameters(config: Mapping[str, Any], brand: Brand) -> list[dict[str, 
         ),
         ("Seed", local_mode["seed"], "Deterministic local-mode random seed."),
     ]
-    return [_parameter(*value) for value in values]
+    parameters = [_parameter(*value) for value in values]
+    # Defensive invariant: ensure no code path reintroduces an identity parameter.
+    for parameter in parameters:
+        if parameter["Name"] in FORBIDDEN_PARAMETER_NAMES:
+            raise ValueError(
+                f"Pipeline identity {parameter['Name']!r} must be a build-time literal, "
+                "not an overridable execution parameter."
+            )
+    return parameters
 
 
 def _ref(parameter_name: str) -> dict[str, str]:
@@ -230,13 +245,18 @@ def _step_ref(step_name: str, property_file: str, path: str) -> dict[str, Any]:
     }
 
 
-def _s3_uri(bucket_parameter: str, *parts: str) -> dict[str, Any]:
-    return {
-        "Std:Join": {
-            "On": "/",
-            "Values": ["s3:/", _ref(bucket_parameter), *parts],
-        }
-    }
+def _s3_uri(bucket: str, *parts: str) -> str:
+    """Return a concrete ``s3://`` URI literal.
+
+    The bucket name is always baked in at build time (never a pipeline
+    parameter reference) so the code channel and the output locations cannot be
+    redirected by a ``StartPipelineExecution`` ``PipelineParameters`` override.
+    """
+    if not isinstance(bucket, str) or not bucket:
+        raise ValueError("S3 bucket must be a non-empty literal string, not a reference.")
+    cleaned = [part for part in parts if part != ""]
+    suffix = "/" + "/".join(cleaned) if cleaned else "/"
+    return f"s3://{bucket}{suffix}"
 
 
 def _environment(*pairs: tuple[str, str]) -> dict[str, Any]:
@@ -246,6 +266,8 @@ def _environment(*pairs: tuple[str, str]) -> dict[str, Any]:
 def _processing_step(
     name: str,
     code_name: str,
+    role_arn: str,
+    code_s3_uri: str,
     inputs: list[dict[str, Any]],
     outputs: list[dict[str, Any]],
     environment: dict[str, Any],
@@ -255,7 +277,7 @@ def _processing_step(
         "Name": name,
         "Type": "Processing",
         "Arguments": {
-            "RoleArn": _ref("SageMakerRoleArn"),
+            "RoleArn": role_arn,
             "AppSpecification": {
                 "ImageUri": (
                     "683313688378.dkr.ecr.us-west-2.amazonaws.com/"
@@ -275,7 +297,7 @@ def _processing_step(
                 {
                     "InputName": "pipeline-code",
                     "S3Input": {
-                        "S3Uri": _s3_uri("PipelineArtifactsBucket", "code"),
+                        "S3Uri": code_s3_uri,
                         "LocalPath": "/opt/ml/processing/input/code",
                         "S3DataType": "S3Prefix",
                         "S3InputMode": "File",
@@ -295,18 +317,34 @@ def build_dry_run_definition(
     config_path: str | Path = DEFAULT_CONFIG_PATH,
     brand_id: str = "white-castle",
 ) -> dict[str, Any]:
-    """Build a complete SageMaker-compatible local DAG without AWS or SDK imports."""
+    """Build a complete SageMaker-compatible local DAG without AWS or SDK imports.
+
+    The SageMaker execution role ARN and all four project bucket names are
+    resolved from configuration and baked into the definition as literal
+    strings. They are *not* emitted as pipeline parameters, so a caller with
+    ``sagemaker:StartPipelineExecution`` cannot override the code channel, the
+    output locations, or the job role via ``PipelineParameters`` (CWE-494).
+    """
     config = load_config(config_path)
     brand = get_brand(config, brand_id)
+
+    role_arn = config["aws"]["sagemaker_role_arn"]
+    training_bucket = config["s3"]["training_bucket"]
+    model_artifacts_bucket = config["s3"]["model_artifacts_bucket"]
+    pipeline_artifacts_bucket = config["s3"]["pipeline_artifacts_bucket"]
+    raw_archive_bucket = config["s3"]["raw_archive_bucket"]
+    code_s3_uri = _s3_uri(pipeline_artifacts_bucket, "code")
 
     select_data = _processing_step(
         "SelectRecentBrandData",
         "data_selection.py",
+        role_arn,
+        code_s3_uri,
         [
             {
                 "InputName": "raw-archive",
                 "S3Input": {
-                    "S3Uri": _s3_uri("RawArchiveBucket", ""),
+                    "S3Uri": _s3_uri(raw_archive_bucket, ""),
                     "LocalPath": "/opt/ml/processing/input/raw",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
@@ -317,7 +355,7 @@ def build_dry_run_definition(
             {
                 "OutputName": "selected-dataset",
                 "S3Output": {
-                    "S3Uri": _s3_uri("TrainingBucket", brand.id, "selected"),
+                    "S3Uri": _s3_uri(training_bucket, brand.id, "selected"),
                     "LocalPath": "/opt/ml/processing/output/dataset",
                     "S3UploadMode": "EndOfJob",
                 },
@@ -325,7 +363,7 @@ def build_dry_run_definition(
             {
                 "OutputName": "selection-metrics",
                 "S3Output": {
-                    "S3Uri": _s3_uri("PipelineArtifactsBucket", brand.id, "selection"),
+                    "S3Uri": _s3_uri(pipeline_artifacts_bucket, brand.id, "selection"),
                     "LocalPath": "/opt/ml/processing/output/metrics",
                     "S3UploadMode": "EndOfJob",
                 },
@@ -352,11 +390,13 @@ def build_dry_run_definition(
     embed_and_deduplicate = _processing_step(
         "EmbedAndDeduplicate",
         "embedding_dedup.py",
+        role_arn,
+        code_s3_uri,
         [
             {
                 "InputName": "selected-dataset",
                 "S3Input": {
-                    "S3Uri": _s3_uri("TrainingBucket", brand.id, "selected"),
+                    "S3Uri": _s3_uri(training_bucket, brand.id, "selected"),
                     "LocalPath": "/opt/ml/processing/input/dataset",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
@@ -367,7 +407,7 @@ def build_dry_run_definition(
             {
                 "OutputName": "deduplicated-dataset",
                 "S3Output": {
-                    "S3Uri": _s3_uri("TrainingBucket", brand.id, "deduplicated"),
+                    "S3Uri": _s3_uri(training_bucket, brand.id, "deduplicated"),
                     "LocalPath": "/opt/ml/processing/output/dataset",
                     "S3UploadMode": "EndOfJob",
                 },
@@ -386,11 +426,13 @@ def build_dry_run_definition(
     label_quality = _processing_step(
         "KFoldCleanlabQuality",
         "kfold_cleanlab.py",
+        role_arn,
+        code_s3_uri,
         [
             {
                 "InputName": "deduplicated-dataset",
                 "S3Input": {
-                    "S3Uri": _s3_uri("TrainingBucket", brand.id, "deduplicated"),
+                    "S3Uri": _s3_uri(training_bucket, brand.id, "deduplicated"),
                     "LocalPath": "/opt/ml/processing/input/dataset",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
@@ -401,7 +443,7 @@ def build_dry_run_definition(
             {
                 "OutputName": "quality-dataset",
                 "S3Output": {
-                    "S3Uri": _s3_uri("TrainingBucket", brand.id, "quality"),
+                    "S3Uri": _s3_uri(training_bucket, brand.id, "quality"),
                     "LocalPath": "/opt/ml/processing/output/dataset",
                     "S3UploadMode": "EndOfJob",
                 },
@@ -409,7 +451,7 @@ def build_dry_run_definition(
             {
                 "OutputName": "quality-metrics",
                 "S3Output": {
-                    "S3Uri": _s3_uri("PipelineArtifactsBucket", brand.id, "quality"),
+                    "S3Uri": _s3_uri(pipeline_artifacts_bucket, brand.id, "quality"),
                     "LocalPath": "/opt/ml/processing/output/metrics",
                     "S3UploadMode": "EndOfJob",
                 },
@@ -433,11 +475,13 @@ def build_dry_run_definition(
     detect_drift = _processing_step(
         "DetectDrift",
         "drift_detection.py",
+        role_arn,
+        code_s3_uri,
         [
             {
                 "InputName": "quality-dataset",
                 "S3Input": {
-                    "S3Uri": _s3_uri("TrainingBucket", brand.id, "quality"),
+                    "S3Uri": _s3_uri(training_bucket, brand.id, "quality"),
                     "LocalPath": "/opt/ml/processing/input/dataset",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
@@ -448,7 +492,7 @@ def build_dry_run_definition(
             {
                 "OutputName": "drift-metrics",
                 "S3Output": {
-                    "S3Uri": _s3_uri("PipelineArtifactsBucket", brand.id, "drift"),
+                    "S3Uri": _s3_uri(pipeline_artifacts_bucket, brand.id, "drift"),
                     "LocalPath": "/opt/ml/processing/output/metrics",
                     "S3UploadMode": "EndOfJob",
                 },
@@ -473,7 +517,7 @@ def build_dry_run_definition(
         "Name": "TrainBrandClassifier",
         "Type": "Training",
         "Arguments": {
-            "RoleArn": _ref("SageMakerRoleArn"),
+            "RoleArn": role_arn,
             "AlgorithmSpecification": {
                 "TrainingImage": "433757028032.dkr.ecr.us-west-2.amazonaws.com/xgboost:1.7-1",
                 "TrainingInputMode": "File",
@@ -485,7 +529,7 @@ def build_dry_run_definition(
                     "DataSource": {
                         "S3DataSource": {
                             "S3DataType": "S3Prefix",
-                            "S3Uri": _s3_uri("TrainingBucket", brand.id, "quality"),
+                            "S3Uri": _s3_uri(training_bucket, brand.id, "quality"),
                             "S3DataDistributionType": "FullyReplicated",
                         }
                     },
@@ -495,13 +539,15 @@ def build_dry_run_definition(
                     "DataSource": {
                         "S3DataSource": {
                             "S3DataType": "S3Prefix",
-                            "S3Uri": _s3_uri("PipelineArtifactsBucket", "code"),
+                            "S3Uri": code_s3_uri,
                             "S3DataDistributionType": "FullyReplicated",
                         }
                     },
                 },
             ],
-            "OutputDataConfig": {"S3OutputPath": _s3_uri("ModelArtifactsBucket", brand.id)},
+            "OutputDataConfig": {
+                "S3OutputPath": _s3_uri(model_artifacts_bucket, brand.id)
+            },
             "ResourceConfig": {
                 "InstanceType": _ref("TrainingInstanceType"),
                 "InstanceCount": 1,
@@ -509,7 +555,9 @@ def build_dry_run_definition(
             },
             "StoppingCondition": {"MaxRuntimeInSeconds": 86_400, "MaxWaitTimeInSeconds": 172_800},
             "EnableManagedSpotTraining": _ref("UseSpot"),
-            "CheckpointConfig": {"S3Uri": _s3_uri("ModelArtifactsBucket", brand.id, "checkpoints")},
+            "CheckpointConfig": {
+                "S3Uri": _s3_uri(model_artifacts_bucket, brand.id, "checkpoints")
+            },
             "HyperParameters": {
                 "classifier": _ref("Classifier"),
                 "epochs": _ref("Epochs"),
@@ -526,11 +574,13 @@ def build_dry_run_definition(
     evaluate_model = _processing_step(
         "EvaluateModel",
         "evaluation.py",
+        role_arn,
+        code_s3_uri,
         [
             {
                 "InputName": "model-artifacts",
                 "S3Input": {
-                    "S3Uri": _s3_uri("ModelArtifactsBucket", brand.id),
+                    "S3Uri": _s3_uri(model_artifacts_bucket, brand.id),
                     "LocalPath": "/opt/ml/processing/input/model",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
@@ -541,7 +591,7 @@ def build_dry_run_definition(
             {
                 "OutputName": "evaluation-metrics",
                 "S3Output": {
-                    "S3Uri": _s3_uri("PipelineArtifactsBucket", brand.id, "evaluation"),
+                    "S3Uri": _s3_uri(pipeline_artifacts_bucket, brand.id, "evaluation"),
                     "LocalPath": "/opt/ml/processing/output/metrics",
                     "S3UploadMode": "EndOfJob",
                 },
@@ -586,7 +636,10 @@ def build_dry_run_definition(
                     "Statistics": {
                         "ContentType": "application/json",
                         "S3Uri": _s3_uri(
-                            "PipelineArtifactsBucket", brand.id, "evaluation", "metrics.json"
+                            pipeline_artifacts_bucket,
+                            brand.id,
+                            "evaluation",
+                            "metrics.json",
                         ),
                     }
                 }
@@ -828,6 +881,56 @@ def validate_dry_run_definition(definition: Mapping[str, Any]) -> None:
     for parameter in ("BrandId", "ModelPackageGroup", "AccuracyThreshold", "UseSpot", "Seed"):
         if parameter not in parameters:
             raise ValueError(f"Local DAG is missing required parameter: {parameter}")
+
+    # Deployment identity (role ARN and project buckets) must be literals baked
+    # into the definition, not overridable pipeline parameters. If a future
+    # change reintroduces them, StartPipelineExecution callers would regain the
+    # ability to redirect the code channel or run jobs under a different role.
+    forbidden = FORBIDDEN_PARAMETER_NAMES.intersection(parameters)
+    if forbidden:
+        raise ValueError(
+            "Pipeline identity values must be baked in as literals, not exposed "
+            f"as execution parameters: {sorted(forbidden)}"
+        )
+
+    # Every RoleArn and every code-channel S3Uri must be a literal string --
+    # no ``Get: Parameters.*`` indirection -- so a PipelineParameters override
+    # cannot swap in an attacker role or an attacker code bucket.
+    def _walk(node: Any, path: str = "$") -> None:
+        if isinstance(node, Mapping):
+            role = node.get("RoleArn") if "RoleArn" in node else None
+            if role is not None and not isinstance(role, str):
+                raise ValueError(
+                    f"RoleArn at {path} must be a literal string; found parameter reference"
+                )
+            if (
+                node.get("InputName") == "pipeline-code"
+                and isinstance(node.get("S3Input"), Mapping)
+            ):
+                uri = node["S3Input"].get("S3Uri")
+                if not isinstance(uri, str) or not uri.startswith("s3://"):
+                    raise ValueError(
+                        f"pipeline-code S3Uri at {path} must be a literal s3:// URI; "
+                        "parameterised code channels enable code-channel hijack"
+                    )
+            if node.get("ChannelName") == "code":
+                uri = (
+                    node.get("DataSource", {})
+                    .get("S3DataSource", {})
+                    .get("S3Uri")
+                )
+                if not isinstance(uri, str) or not uri.startswith("s3://"):
+                    raise ValueError(
+                        f"training 'code' channel S3Uri at {path} must be a literal "
+                        "s3:// URI; parameterised code channels enable code-channel hijack"
+                    )
+            for key, value in node.items():
+                _walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                _walk(value, f"{path}[{index}]")
+
+    _walk(definition)
 
     register_step = next(
         step
