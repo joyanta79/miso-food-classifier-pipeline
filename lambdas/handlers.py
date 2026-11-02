@@ -141,6 +141,88 @@ def eventbridge_trigger_handler(
     }
 
 
+def _split_claim_values(value: Any) -> list[str]:
+    """Normalize an authorizer claim into a list of individual values.
+
+    Authorizer context values arrive as strings from API Gateway Lambda
+    authorizers (even when they are lists in the authorizer source), while
+    JWT/Cognito claims may already be lists. Accept both and split on common
+    separators so callers can pass ``"brand-a,brand-b"``, ``"brand-a brand-b"``,
+    or a JSON array transparently.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        values: list[str] = []
+        for item in value:
+            values.extend(_split_claim_values(item))
+        return values
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.strip()
+    if not value:
+        return []
+    # Support JSON-encoded arrays smuggled through a string claim.
+    if value.startswith("[") and value.endswith("]"):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, list):
+            return _split_claim_values(parsed)
+    return [
+        part.strip()
+        for part in value.replace(";", ",").replace(" ", ",").split(",")
+        if part.strip()
+    ]
+
+
+def _authorized_brands(event: dict[str, Any]) -> set[str]:
+    """Return the set of brand ids the authenticated caller is allowed to drive.
+
+    The caller identity must come from an upstream API Gateway authorizer (JWT,
+    Cognito, or Lambda authorizer) or REQUEST authorizer context propagated in
+    ``event['requestContext']['authorizer']``. If no authorizer context is
+    present the request is treated as unauthenticated and rejected.
+
+    The allowed brand set is sourced from, in priority order:
+      * ``allowed_brands`` claim/context value (comma / space / JSON list).
+      * ``brand_id`` claim/context value (single brand binding).
+      * ``cognito:groups`` claim entries that start with ``brand:`` (e.g.
+        ``brand:white-castle``).
+    """
+    request_context = event.get("requestContext") if isinstance(event, dict) else None
+    if not isinstance(request_context, dict):
+        raise PermissionError(
+            "Unauthenticated manual training request: missing requestContext"
+        )
+    authorizer = request_context.get("authorizer")
+    if not isinstance(authorizer, dict) or not authorizer:
+        raise PermissionError(
+            "Unauthenticated manual training request: missing authorizer context"
+        )
+
+    # JWT / Cognito authorizers nest verified claims under ``claims``; Lambda
+    # (REQUEST/TOKEN) authorizers place context fields directly on authorizer.
+    claims = authorizer.get("claims") if isinstance(authorizer.get("claims"), dict) else {}
+    jwt_block = authorizer.get("jwt") if isinstance(authorizer.get("jwt"), dict) else {}
+    jwt_claims = jwt_block.get("claims") if isinstance(jwt_block.get("claims"), dict) else {}
+
+    def _lookup(key: str) -> Any:
+        for source in (claims, jwt_claims, authorizer):
+            if isinstance(source, dict) and key in source and source[key] not in (None, ""):
+                return source[key]
+        return None
+
+    allowed: set[str] = set()
+    allowed.update(_split_claim_values(_lookup("allowed_brands")))
+    allowed.update(_split_claim_values(_lookup("brand_id")))
+    for group in _split_claim_values(_lookup("cognito:groups")):
+        if group.startswith("brand:") and len(group) > len("brand:"):
+            allowed.add(group.split(":", 1)[1])
+    return allowed
+
+
 def manual_trigger_handler(
     event: dict[str, Any],
     context: Any,
@@ -148,13 +230,32 @@ def manual_trigger_handler(
     sagemaker_client: Any | None = None,
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Start a brand pipeline from an authenticated manual invocation."""
+    """Start a brand pipeline from an authenticated manual invocation.
+
+    The caller identity must be established upstream (API Gateway JWT/Cognito
+    authorizer, Lambda authorizer, or equivalent) and surfaced through
+    ``event['requestContext']['authorizer']``. The handler authorizes the
+    requested ``brand_id`` against the brand set bound to that principal and
+    rejects any brand outside it, regardless of whether the brand is listed in
+    ``config.yaml``.
+    """
+    allowed_brands = _authorized_brands(event)
+    if not allowed_brands:
+        raise PermissionError(
+            "Authenticated principal is not authorized for any brand"
+        )
+
     body = event.get("body", event)
     if isinstance(body, str):
         body = json.loads(body)
     brand_id = body.get("brand_id")
     if not brand_id:
         raise ValueError("brand_id is required for a manual training request")
+    if brand_id not in allowed_brands:
+        # Do not leak which brands the caller is bound to.
+        raise PermissionError(
+            f"Caller is not authorized to trigger training for brand_id {brand_id!r}"
+        )
 
     return eventbridge_trigger_handler(
         {"detail": {**body, "brand_id": brand_id, "trigger": "manual"}},

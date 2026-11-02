@@ -57,6 +57,9 @@ data "aws_iam_policy_document" "sagemaker_permissions" {
   }
 
   # SageMaker jobs, pipelines, and registry within this account/region.
+  # StartPipelineExecution is further narrowed to the per-brand pipelines this
+  # stack provisions so a compromise of the execution role (or a Lambda that
+  # assumes it) cannot start arbitrary pipelines in the account.
   statement {
     sid = "SageMakerJobs"
     actions = [
@@ -70,10 +73,15 @@ data "aws_iam_policy_document" "sagemaker_permissions" {
       "sagemaker:DescribeModelPackageGroup",
       "sagemaker:ListModelPackages",
       "sagemaker:AddTags",
-      "sagemaker:StartPipelineExecution",
       "sagemaker:DescribePipelineExecution",
     ]
     resources = ["arn:aws:sagemaker:${var.aws_region}:${data.aws_caller_identity.current.account_id}:*"]
+  }
+
+  statement {
+    sid       = "SageMakerStartPipelineExecution"
+    actions   = ["sagemaker:StartPipelineExecution"]
+    resources = [for p in aws_sagemaker_pipeline.brand : p.arn]
   }
 
   # CloudWatch Logs for job output.
