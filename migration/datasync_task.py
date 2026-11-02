@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# Terminal states for a DataSync TaskExecution. Only ``SUCCESS`` indicates that
+# every file in scope has been copied and verified by DataSync; the remaining
+# states (``ERROR``) are terminal failures. All other states
+# (``LAUNCHING``, ``PREPARING``, ``TRANSFERRING``, ``VERIFYING``, ``QUEUED``)
+# are non-terminal and must be polled through.
+_DATASYNC_TERMINAL_STATES = frozenset({"SUCCESS", "ERROR"})
 
 
 def validate_checksums(source: str | Path, destination: str | Path) -> dict[str, Any]:
@@ -30,6 +38,7 @@ class ChecksumResult:
     destination_key: str
     algorithm: str
     matched: bool
+    destination_version_id: str | None = None
 
 
 class DataSyncTask:
@@ -126,27 +135,68 @@ class DataSyncTask:
             raise ValueError("Object metadata lacks ChecksumSHA256 and ETag")
         return "ETag", str(etag).strip('"')
 
+    @staticmethod
+    def _head_destination(
+        destination_s3_client: Any, bucket: str, key: str
+    ) -> dict[str, Any]:
+        """HEAD the destination object, converting a 404 into a validation failure.
+
+        A missing destination object means the DataSync transfer did not write
+        the object we were asked to verify (or the key is wrong). Treat it as
+        an integrity-gate failure rather than letting the underlying
+        ``ClientError``/404 escape unhandled.
+        """
+        try:
+            return destination_s3_client.head_object(Bucket=bucket, Key=key)
+        except Exception as exc:  # pragma: no cover - exercised at integration
+            # Detect the common boto3 404 shape without a hard dependency on
+            # botocore being importable at module load time.
+            response = getattr(exc, "response", None)
+            if isinstance(response, dict):
+                error = response.get("Error", {})
+                code = str(error.get("Code", ""))
+                status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+                if code in {"404", "NoSuchKey", "NotFound"} or status == 404:
+                    raise ValueError(
+                        f"Destination object missing for {key!r} in {bucket!r}: "
+                        "post-transfer integrity validation failed."
+                    ) from exc
+            raise
+
     def validate_checksums(
         self,
         source_s3_client: Any,
         destination_s3_client: Any,
         objects: Iterable[dict[str, str]],
     ) -> list[ChecksumResult]:
-        """Validate source/destination checksums and fail closed on any mismatch."""
+        """Validate source/destination checksums and fail closed on any mismatch.
+
+        The destination ``VersionId`` (when S3 versioning is enabled) is
+        captured on the ``ChecksumResult`` so the verified digest is pinned to
+        the exact object version that was migrated, rather than to a key that
+        may be overwritten later.
+        """
         results: list[ChecksumResult] = []
         for item in objects:
             source_key = item["source_key"]
             destination_key = item.get("destination_key", source_key)
             source_head = source_s3_client.head_object(Bucket=item["source_bucket"], Key=source_key)
-            destination_head = destination_s3_client.head_object(
-                Bucket=item["destination_bucket"], Key=destination_key
+            destination_head = self._head_destination(
+                destination_s3_client, item["destination_bucket"], destination_key
             )
             source_algorithm, source_value = self._checksum(source_head)
             destination_algorithm, destination_value = self._checksum(destination_head)
             matched = (
                 source_algorithm == destination_algorithm and source_value == destination_value
             )
-            result = ChecksumResult(source_key, destination_key, source_algorithm, matched)
+            destination_version_id = destination_head.get("VersionId")
+            result = ChecksumResult(
+                source_key,
+                destination_key,
+                source_algorithm,
+                matched,
+                destination_version_id,
+            )
             results.append(result)
             if not matched:
                 raise ValueError(
@@ -156,6 +206,53 @@ class DataSyncTask:
                 )
         return results
 
+    @staticmethod
+    def wait_for_execution(
+        datasync_client: Any,
+        task_execution_arn: str,
+        *,
+        poll_interval_seconds: float = 15.0,
+        timeout_seconds: float = 6 * 60 * 60,
+        sleep: Any = time.sleep,
+        now: Any = time.monotonic,
+    ) -> dict[str, Any]:
+        """Block until a DataSync TaskExecution reaches a terminal state.
+
+        Returns the final ``describe_task_execution`` response on ``SUCCESS``.
+        Raises ``RuntimeError`` on ``ERROR`` or on timeout. ``StartTaskExecution``
+        is asynchronous, so this synchronization is required before any
+        post-transfer integrity check can inspect destination bytes.
+        """
+        if poll_interval_seconds <= 0:
+            raise ValueError("poll_interval_seconds must be positive")
+        deadline = now() + timeout_seconds
+        while True:
+            description = datasync_client.describe_task_execution(
+                TaskExecutionArn=task_execution_arn
+            )
+            status = description.get("Status")
+            if status == "SUCCESS":
+                return description
+            if status == "ERROR":
+                result = description.get("Result", {}) or {}
+                raise RuntimeError(
+                    f"DataSync task execution {task_execution_arn} failed with status "
+                    f"{status!r}: ErrorCode={result.get('ErrorCode')!r}, "
+                    f"ErrorDetail={result.get('ErrorDetail')!r}"
+                )
+            if status in _DATASYNC_TERMINAL_STATES:
+                # Defensive: any other terminal state should abort validation.
+                raise RuntimeError(
+                    f"DataSync task execution {task_execution_arn} ended in "
+                    f"non-success terminal state {status!r}."
+                )
+            if now() >= deadline:
+                raise RuntimeError(
+                    f"Timed out after {timeout_seconds:.0f}s waiting for DataSync "
+                    f"task execution {task_execution_arn}; last status={status!r}."
+                )
+            sleep(poll_interval_seconds)
+
     def start_and_validate(
         self,
         datasync_client: Any,
@@ -163,13 +260,32 @@ class DataSyncTask:
         destination_s3_client: Any,
         objects: Iterable[dict[str, str]],
         task_arn: str | None = None,
+        *,
+        poll_interval_seconds: float = 15.0,
+        timeout_seconds: float = 6 * 60 * 60,
     ) -> dict[str, Any]:
-        """Start a task and run explicit post-transfer S3 checksum validation."""
+        """Start a task and run explicit post-transfer S3 checksum validation.
+
+        ``StartTaskExecution`` is asynchronous: it returns a ``TaskExecutionArn``
+        as soon as the execution is queued, long before any object has been
+        copied. The post-transfer integrity gate below must therefore wait for
+        the execution to reach the ``SUCCESS`` terminal state before running
+        ``validate_checksums`` -- otherwise it inspects destination state the
+        transfer has not written yet, producing either a 404 error or a
+        false-positive match against a stale/pre-planted object.
+        """
         resolved_task_arn = task_arn or self.create_task(datasync_client)
         execution = datasync_client.start_task_execution(TaskArn=resolved_task_arn)
+        task_execution_arn = execution["TaskExecutionArn"]
+        self.wait_for_execution(
+            datasync_client,
+            task_execution_arn,
+            poll_interval_seconds=poll_interval_seconds,
+            timeout_seconds=timeout_seconds,
+        )
         checksums = self.validate_checksums(source_s3_client, destination_s3_client, objects)
         return {
             "task_arn": resolved_task_arn,
-            "task_execution_arn": execution["TaskExecutionArn"],
+            "task_execution_arn": task_execution_arn,
             "checksums": checksums,
         }
