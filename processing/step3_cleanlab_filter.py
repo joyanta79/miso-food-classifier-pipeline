@@ -10,22 +10,45 @@ from typing import Any
 
 import numpy as np
 
+# Provenance tags recorded in the gate report. Downstream gates compare against
+# ``DETECTOR_CLEANLAB`` and MUST reject any report whose detector is not the
+# real CleanLab detector -- the local heuristic is an additional signal only,
+# never a substitute for the label-quality control.
+DETECTOR_CLEANLAB = "cleanlab"
+DETECTOR_FALLBACK = "fallback"
 
-def _cleanlab_issue_mask(labels: np.ndarray, pred_probs: np.ndarray) -> np.ndarray:
-    """Use CleanLab when present; retain a deterministic consistency floor locally."""
-    issues = np.zeros(len(labels), dtype=bool)
+
+def _cleanlab_version() -> str:
     try:
-        from cleanlab.filter import find_label_issues
+        import cleanlab  # type: ignore[import-not-found]
 
-        issues |= np.asarray(find_label_issues(labels=labels, pred_probs=pred_probs), dtype=bool)
+        return str(getattr(cleanlab, "__version__", "unknown"))
     except ImportError:
-        pass
+        return "unavailable"
+
+
+def _cleanlab_issue_mask(
+    labels: np.ndarray, pred_probs: np.ndarray
+) -> tuple[np.ndarray, str, str]:
+    """Run the real CleanLab detector and OR in a deterministic consistency floor.
+
+    Returns the issue mask alongside the detector name and version actually
+    used. ImportError from CleanLab is NOT swallowed: the label-quality gate
+    fails closed on a missing detector so the Processing job exits non-zero.
+    """
+    # Import at call time so missing/broken CleanLab aborts this step loudly
+    # rather than silently producing a report backed only by the local floor.
+    from cleanlab.filter import find_label_issues  # noqa: F401  (fail-closed import)
+
+    issues = np.asarray(
+        find_label_issues(labels=labels, pred_probs=pred_probs), dtype=bool
+    )
     predicted = pred_probs.argmax(axis=1)
     confidence = pred_probs.max(axis=1)
-    # A high-confidence disagreement is independently reproducible and catches
-    # synthetic/local injected noise even without the optional CleanLab package.
+    # A high-confidence disagreement is independently reproducible and is kept
+    # as an *additional* signal on top of CleanLab, never as a substitute.
     issues |= (predicted != labels) & (confidence >= 0.50)
-    return issues
+    return issues, DETECTOR_CLEANLAB, _cleanlab_version()
 
 
 def filter_label_issues(
@@ -34,7 +57,7 @@ def filter_label_issues(
     classes: Iterable[str],
     *,
     flag_threshold_fraction: float = 0.05,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, float | int]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, float | int | str]]:
     """Return flagged records, clean records, and pipeline-gate report."""
     records = list(mapping)
     class_names = list(classes)
@@ -46,7 +69,7 @@ def filter_label_issues(
         labels = np.asarray([index[str(record["label"])] for record in records], dtype=int)
     except KeyError as error:
         raise ValueError(f"Label absent from classes: {error.args[0]}") from error
-    issue_mask = _cleanlab_issue_mask(labels, probabilities)
+    issue_mask, detector, detector_version = _cleanlab_issue_mask(labels, probabilities)
     near_duplicate_mask = np.asarray(
         [bool(record.get("near_duplicate", False)) for record in records], dtype=bool
     )
@@ -71,11 +94,16 @@ def filter_label_issues(
             )
         else:
             cleaned.append(record)
-    report: dict[str, float | int] = {
+    report: dict[str, float | int | str] = {
         "total_images": len(records),
         "flagged_images": len(flagged),
         "flagged_fraction": len(flagged) / len(records) if records else 0.0,
         "flag_threshold_fraction": flag_threshold_fraction,
+        # Provenance: downstream CleanlabQualityGate rejects any report whose
+        # detector is not DETECTOR_CLEANLAB. Operators reading metrics.json can
+        # tell "CleanLab found few issues" from "CleanLab never ran".
+        "detector": detector,
+        "detector_version": detector_version,
     }
     return flagged, cleaned, report
 
@@ -83,7 +111,7 @@ def filter_label_issues(
 def write_outputs(
     flagged: list[dict[str, Any]],
     cleaned: list[dict[str, Any]],
-    report: dict[str, float | int],
+    report: dict[str, float | int | str],
     output_dir: str | Path,
 ) -> None:
     directory = Path(output_dir)

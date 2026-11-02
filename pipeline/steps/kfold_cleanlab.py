@@ -30,7 +30,11 @@ _bootstrap.ensure(
         "numpy": "numpy",
         "sklearn": "scikit-learn",
         "xgboost": "xgboost",
-        "cleanlab": "cleanlab",
+        # Pin to the same version as requirements.txt and verify the concrete
+        # symbol the step uses -- not just the top-level package -- so an
+        # API-incompatible resolution fails the step rather than silently
+        # degrading to the fallback heuristic.
+        "cleanlab.filter:find_label_issues": "cleanlab==2.6.4",
     }
 )
 

@@ -30,7 +30,12 @@ EPOCHS = int(os.getenv("MISO_EPOCHS", "3"))
 
 
 def _pip(*pkgs: str) -> None:
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-input", *pkgs], check=False)
+    # ``check=True`` matches the sm_clean_runner helper: a failed dependency
+    # install aborts the training job loudly instead of letting a later import
+    # produce a misleading ImportError in the step log.
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-q", "--no-input", *pkgs], check=True
+    )
 
 
 def _label_from_name(name: str) -> str | None:

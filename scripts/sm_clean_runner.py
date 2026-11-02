@@ -25,16 +25,22 @@ OUT = Path("/opt/ml/processing/output")
 
 
 def _pip(*pkgs: str) -> None:
+    # ``check=True`` fails the Processing job loudly if a dependency install
+    # fails; the step3 CleanLab import no longer swallows ImportError, so a
+    # silently-broken install would otherwise exit the job 0 with a report
+    # produced by the weaker fallback heuristic.
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "-q", "--no-input", *pkgs],
-        check=False,
+        check=True,
     )
 
 
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     # Runtime deps not guaranteed in the base DLC image.
-    _pip("scikit-learn", "xgboost", "cleanlab", "pillow")
+    # Pin cleanlab to the same version as requirements.txt so the runtime
+    # container does not resolve to an API-incompatible release.
+    _pip("scikit-learn", "xgboost", "cleanlab==2.6.4", "pillow")
 
     sys.path.insert(0, str(CODE))
     from processing.step0_data_selection import select_data
