@@ -15,15 +15,31 @@ Python 3.10 compatible.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, "/opt/ml/input/data/pkgcode")
 
 from training.train import train_model  # noqa: E402
+
+
+def _dest_filename(record: dict) -> str:
+    """Build a collision-free destination filename for ``record``.
+
+    The manifest ``id`` is unique per record (relative key); we hash it to a
+    short digest and keep the original suffix so Keras' file-type sniffing
+    still works. Falls back to the image_path basename only when ``id`` is
+    missing (legacy manifests).
+    """
+    rel = record.get("image_path", "")
+    suffix = PurePosixPath(str(rel)).suffix or Path(record.get("id", "")).suffix
+    identity = str(record.get("id") or rel)
+    digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
+    return f"{digest}{suffix}"
 
 
 def _prep_class_dirs(
@@ -34,20 +50,40 @@ def _prep_class_dirs(
         by_class.setdefault(record["label"], []).append(record)
     train_root = work / "train"
     val_root = work / "validation"
+    copied_counts: dict[str, int] = {}
     for label, records in by_class.items():
         records = sorted(records, key=lambda r: r["image_path"])
         n_val = max(1, int(len(records) * val_fraction))
         val = records[:n_val]
         train = records[n_val:] or records  # never leave train empty
+        label_copied = 0
         for split_root, split in ((train_root, train), (val_root, val)):
             dest = split_root / label
             dest.mkdir(parents=True, exist_ok=True)
             for record in split:
                 src = images_root / record["image_path"]
-                if src.exists():
-                    shutil.copy(src, dest / record["image_path"])
-    counts = {label: len(records) for label, records in by_class.items()}
-    print(f"[train_step] prepared class dirs: {counts}")
+                if not src.exists():
+                    # Fail closed: the gate metrics are computed over the
+                    # manifest, so a missing source means the materialised
+                    # dataset would diverge from what the gates approved.
+                    raise FileNotFoundError(
+                        f"[train_step] manifest record {record.get('id', record['image_path'])!r} "
+                        f"resolves to missing file {src}; refusing to train on a dataset "
+                        "that disagrees with the selection gate metrics."
+                    )
+                # Derive the destination filename from a unique record id so
+                # two records with the same basename (e.g. a/x.jpg and b/x.jpg)
+                # do not overwrite each other in the prepared class dir.
+                shutil.copy(src, dest / _dest_filename(record))
+                label_copied += 1
+        copied_counts[label] = label_copied
+    manifest_counts = {label: len(records) for label, records in by_class.items()}
+    if copied_counts != manifest_counts:
+        raise RuntimeError(
+            "[train_step] copied-file counts do not match manifest counts: "
+            f"manifest={manifest_counts} copied={copied_counts}"
+        )
+    print(f"[train_step] prepared class dirs: {copied_counts}")
 
 
 def main() -> None:

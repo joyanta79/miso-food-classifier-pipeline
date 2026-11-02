@@ -58,12 +58,18 @@ def select(
         if parsed is None:
             continue
         label, confidence = parsed
+        # Record the path relative to ``image_root`` as a POSIX string so that
+        # discovery (``rglob``) and resolution (``images_root / image_path``)
+        # use the same namespace. ``id`` and ``key`` are set to the same
+        # relative key so records are uniquely identified even when two files
+        # under different sub-prefixes share a basename.
+        rel_path = path.relative_to(image_root).as_posix()
         label_counts[label] += 1
         manifest.append(
             {
-                "id": path.name,
-                "key": path.name,
-                "image_path": path.name,
+                "id": rel_path,
+                "key": rel_path,
+                "image_path": rel_path,
                 "label": label,
                 "confidence": confidence,
                 "last_modified": datetime.now(UTC).isoformat(),
