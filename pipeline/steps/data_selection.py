@@ -39,6 +39,15 @@ def _parse_name(path: Path) -> tuple[str, str] | None:
     return label, confidence
 
 
+def _brand_token(path: Path) -> str | None:
+    """Return the brand token (``parts[0]``) parsed from the filename stem."""
+    stem = path.stem
+    parts = stem.split("_")
+    if len(parts) < 3:
+        return None
+    return parts[0]
+
+
 def select(
     image_root: Path,
     naming_prefix: str,
@@ -46,9 +55,11 @@ def select(
     min_images_per_class: int,
     target_dataset_min: int,
     target_dataset_max: int,
+    brand_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     manifest: list[dict[str, Any]] = []
     label_counts: Counter[str] = Counter()
+    expected_brand_token = naming_prefix.rstrip("_") if naming_prefix else None
     for path in sorted(image_root.rglob("*")):
         if path.suffix.lower() not in _IMAGE_SUFFIXES:
             continue
@@ -57,6 +68,18 @@ def select(
         parsed = _parse_name(path)
         if parsed is None:
             continue
+        # Cross-check the parsed brand token against the configured naming
+        # prefix. ``path.name.startswith(naming_prefix)`` only guarantees a
+        # textual match; this also catches malformed names and defends against
+        # a BrandId/BrandNamingPattern mismatch leaking data from the shared
+        # raw-archive bucket into another brand's artifacts.
+        token = _brand_token(path)
+        if expected_brand_token is not None and token != expected_brand_token:
+            raise ValueError(
+                f"Refusing to curate {path.name!r}: brand token {token!r} does "
+                f"not match configured prefix {naming_prefix!r} (expected token "
+                f"{expected_brand_token!r})."
+            )
         label, confidence = parsed
         label_counts[label] += 1
         manifest.append(
@@ -90,6 +113,7 @@ def main() -> None:
     args = parser.parse_args()
 
     naming_prefix = os.environ.get("NAMING_PATTERN", "wc_*").replace("*", "")
+    brand_id = os.environ.get("BRAND_ID")
     min_images_per_class = int(os.environ.get("MIN_IMAGES_PER_CLASS", "20"))
     target_dataset_min = int(os.environ.get("TARGET_DATASET_MIN", "40"))
     target_dataset_max = int(os.environ.get("TARGET_DATASET_MAX", "50000"))
@@ -100,6 +124,7 @@ def main() -> None:
         min_images_per_class=min_images_per_class,
         target_dataset_min=target_dataset_min,
         target_dataset_max=target_dataset_max,
+        brand_id=brand_id,
     )
 
     dataset_out = Path(args.dataset_out)

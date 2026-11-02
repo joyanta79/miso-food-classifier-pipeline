@@ -1,4 +1,8 @@
 {
+  "Metadata": {
+    "BrandId": "brand-c",
+    "GeneratedBy": "pipeline/export_definition.py"
+  },
   "Parameters": [
     {
       "DefaultValue": "us-west-2",
@@ -43,19 +47,19 @@
       "Type": "String"
     },
     {
-      "DefaultValue": "white-castle",
+      "DefaultValue": "brand-c",
       "Description": "Fixed pipeline brand identifier.",
       "Name": "BrandId",
       "Type": "String"
     },
     {
-      "DefaultValue": "wc_*",
+      "DefaultValue": "bc_*",
       "Description": "Allowed raw-data filename prefix pattern.",
       "Name": "BrandNamingPattern",
       "Type": "String"
     },
     {
-      "DefaultValue": "FoodClassifier-WhiteCastle",
+      "DefaultValue": "FoodClassifier-BrandC",
       "Description": "Brand-specific SageMaker Model Registry package group.",
       "Name": "ModelPackageGroup",
       "Type": "String"
@@ -349,7 +353,7 @@
                       {
                         "Get": "Parameters.TrainingBucket"
                       },
-                      "white-castle",
+                      "brand-c",
                       "selected"
                     ]
                   }
@@ -369,7 +373,7 @@
                       {
                         "Get": "Parameters.PipelineArtifactsBucket"
                       },
-                      "white-castle",
+                      "brand-c",
                       "selection"
                     ]
                   }
@@ -501,7 +505,7 @@
                           {
                             "Get": "Parameters.TrainingBucket"
                           },
-                          "white-castle",
+                          "brand-c",
                           "selected"
                         ]
                       }
@@ -544,7 +548,7 @@
                             {
                               "Get": "Parameters.TrainingBucket"
                             },
-                            "white-castle",
+                            "brand-c",
                             "deduplicated"
                           ]
                         }
@@ -607,7 +611,7 @@
                           {
                             "Get": "Parameters.TrainingBucket"
                           },
-                          "white-castle",
+                          "brand-c",
                           "deduplicated"
                         ]
                       }
@@ -650,7 +654,7 @@
                             {
                               "Get": "Parameters.TrainingBucket"
                             },
-                            "white-castle",
+                            "brand-c",
                             "quality"
                           ]
                         }
@@ -670,7 +674,7 @@
                             {
                               "Get": "Parameters.PipelineArtifactsBucket"
                             },
-                            "white-castle",
+                            "brand-c",
                             "quality"
                           ]
                         }
@@ -768,7 +772,7 @@
                                 {
                                   "Get": "Parameters.TrainingBucket"
                                 },
-                                "white-castle",
+                                "brand-c",
                                 "quality"
                               ]
                             }
@@ -811,7 +815,7 @@
                                   {
                                     "Get": "Parameters.PipelineArtifactsBucket"
                                   },
-                                  "white-castle",
+                                  "brand-c",
                                   "drift"
                                 ]
                               }
@@ -904,7 +908,7 @@
                                   {
                                     "Get": "Parameters.ModelArtifactsBucket"
                                   },
-                                  "white-castle",
+                                  "brand-c",
                                   "checkpoints"
                                 ]
                               }
@@ -951,7 +955,7 @@
                                         {
                                           "Get": "Parameters.TrainingBucket"
                                         },
-                                        "white-castle",
+                                        "brand-c",
                                         "quality"
                                       ]
                                     }
@@ -990,7 +994,7 @@
                                   {
                                     "Get": "Parameters.ModelArtifactsBucket"
                                   },
-                                  "white-castle"
+                                  "brand-c"
                                 ]
                               }
                             }
@@ -1056,7 +1060,7 @@
                                       {
                                         "Get": "Parameters.ModelArtifactsBucket"
                                       },
-                                      "white-castle"
+                                      "brand-c"
                                     ]
                                   }
                                 }
@@ -1098,7 +1102,7 @@
                                         {
                                           "Get": "Parameters.PipelineArtifactsBucket"
                                         },
-                                        "white-castle",
+                                        "brand-c",
                                         "evaluation"
                                       ]
                                     }
@@ -1237,7 +1241,7 @@
                                             {
                                               "Get": "Parameters.PipelineArtifactsBucket"
                                             },
-                                            "white-castle",
+                                            "brand-c",
                                             "evaluation",
                                             "metrics.json"
                                           ]
