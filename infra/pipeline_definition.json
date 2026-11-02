@@ -67,24 +67,6 @@
       "Type": "Integer"
     },
     {
-      "DefaultValue": 500,
-      "Description": "Minimum images required in each retained class.",
-      "Name": "MinImagesPerClass",
-      "Type": "Integer"
-    },
-    {
-      "DefaultValue": 6000,
-      "Description": "Minimum accepted dataset size.",
-      "Name": "TargetDatasetMin",
-      "Type": "Integer"
-    },
-    {
-      "DefaultValue": 50000,
-      "Description": "Maximum accepted dataset size.",
-      "Name": "TargetDatasetMax",
-      "Type": "Integer"
-    },
-    {
       "DefaultValue": "imagenet",
       "Description": "Embedding backbone provenance.",
       "Name": "BackboneSource",
@@ -119,12 +101,6 @@
       "Description": "Classifier implementation used for training.",
       "Name": "Classifier",
       "Type": "String"
-    },
-    {
-      "DefaultValue": 0.05,
-      "Description": "Maximum tolerated fraction of Cleanlab label-quality flags.",
-      "Name": "CleanlabFlagThresholdFraction",
-      "Type": "Float"
     },
     {
       "DefaultValue": "ml.g4dn.xlarge",
@@ -175,33 +151,9 @@
       "Type": "Integer"
     },
     {
-      "DefaultValue": 0.97,
-      "Description": "Minimum accepted accuracy.",
-      "Name": "AccuracyThreshold",
-      "Type": "Float"
-    },
-    {
-      "DefaultValue": 0.05,
-      "Description": "Maximum accepted emergency false-positive rate.",
-      "Name": "FpRateEmergencyThreshold",
-      "Type": "Float"
-    },
-    {
-      "DefaultValue": 1000,
-      "Description": "Maximum accepted inference latency.",
-      "Name": "LatencyBudgetMs",
-      "Type": "Integer"
-    },
-    {
       "DefaultValue": 0.85,
       "Description": "Reference confidence level for drift detection.",
       "Name": "ConfidenceBaseline",
-      "Type": "Float"
-    },
-    {
-      "DefaultValue": 0.65,
-      "Description": "Level 1 intervention confidence floor.",
-      "Name": "Level1ConfidenceFloor",
       "Type": "Float"
     },
     {
@@ -209,12 +161,6 @@
       "Description": "Level 2 escalation confidence threshold.",
       "Name": "Level2ConfidenceThreshold",
       "Type": "Float"
-    },
-    {
-      "DefaultValue": 3,
-      "Description": "Correction-rate multiplier that triggers drift action.",
-      "Name": "CorrectionRateMultiplier",
-      "Type": "Integer"
     },
     {
       "DefaultValue": "<replace-with-review-sns-topic-arn>",
@@ -273,9 +219,7 @@
           "BRAND_ID": {
             "Get": "Parameters.BrandId"
           },
-          "MIN_IMAGES_PER_CLASS": {
-            "Get": "Parameters.MinImagesPerClass"
-          },
+          "MIN_IMAGES_PER_CLASS": "500",
           "NAMING_PATTERN": {
             "Get": "Parameters.BrandNamingPattern"
           },
@@ -285,12 +229,8 @@
           "SEED": {
             "Get": "Parameters.Seed"
           },
-          "TARGET_DATASET_MAX": {
-            "Get": "Parameters.TargetDatasetMax"
-          },
-          "TARGET_DATASET_MIN": {
-            "Get": "Parameters.TargetDatasetMin"
-          }
+          "TARGET_DATASET_MAX": "50000",
+          "TARGET_DATASET_MIN": "6000"
         },
         "ProcessingInputs": [
           {
@@ -413,9 +353,7 @@
                 }
               }
             },
-            "RightValue": {
-              "Get": "Parameters.TargetDatasetMin"
-            },
+            "RightValue": 6000,
             "Type": "ConditionGreaterThanOrEqualTo"
           },
           {
@@ -427,9 +365,7 @@
                 }
               }
             },
-            "RightValue": {
-              "Get": "Parameters.TargetDatasetMax"
-            },
+            "RightValue": 50000,
             "Type": "ConditionLessThanOrEqualTo"
           },
           {
@@ -441,9 +377,7 @@
                 }
               }
             },
-            "RightValue": {
-              "Get": "Parameters.MinImagesPerClass"
-            },
+            "RightValue": 500,
             "Type": "ConditionGreaterThanOrEqualTo"
           }
         ],
@@ -582,9 +516,7 @@
                 "CLASSIFIER": {
                   "Get": "Parameters.Classifier"
                 },
-                "CLEANLAB_FLAG_THRESHOLD_FRACTION": {
-                  "Get": "Parameters.CleanlabFlagThresholdFraction"
-                },
+                "CLEANLAB_FLAG_THRESHOLD_FRACTION": "0.05",
                 "KFOLD_COUNT": {
                   "Get": "Parameters.KFoldCount"
                 },
@@ -714,9 +646,7 @@
                       }
                     }
                   },
-                  "RightValue": {
-                    "Get": "Parameters.CleanlabFlagThresholdFraction"
-                  },
+                  "RightValue": 0.05,
                   "Type": "ConditionLessThanOrEqualTo"
                 }
               ],
@@ -743,12 +673,8 @@
                       "CONFIDENCE_BASELINE": {
                         "Get": "Parameters.ConfidenceBaseline"
                       },
-                      "CORRECTION_RATE_MULTIPLIER": {
-                        "Get": "Parameters.CorrectionRateMultiplier"
-                      },
-                      "LEVEL1_CONFIDENCE_FLOOR": {
-                        "Get": "Parameters.Level1ConfidenceFloor"
-                      },
+                      "CORRECTION_RATE_MULTIPLIER": "3",
+                      "LEVEL1_CONFIDENCE_FLOOR": "0.65",
                       "LEVEL2_CONFIDENCE_THRESHOLD": {
                         "Get": "Parameters.Level2ConfidenceThreshold"
                       }
@@ -855,9 +781,7 @@
                             }
                           }
                         },
-                        "RightValue": {
-                          "Get": "Parameters.Level1ConfidenceFloor"
-                        },
+                        "RightValue": 0.65,
                         "Type": "ConditionGreaterThanOrEqualTo"
                       },
                       {
@@ -869,9 +793,7 @@
                             }
                           }
                         },
-                        "RightValue": {
-                          "Get": "Parameters.CorrectionRateMultiplier"
-                        },
+                        "RightValue": 3,
                         "Type": "ConditionLessThanOrEqualTo"
                       }
                     ],
@@ -1031,15 +953,9 @@
                             "ImageUri": "683313688378.dkr.ecr.us-west-2.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3"
                           },
                           "Environment": {
-                            "ACCURACY_THRESHOLD": {
-                              "Get": "Parameters.AccuracyThreshold"
-                            },
-                            "FP_RATE_EMERGENCY_THRESHOLD": {
-                              "Get": "Parameters.FpRateEmergencyThreshold"
-                            },
-                            "LATENCY_BUDGET_MS": {
-                              "Get": "Parameters.LatencyBudgetMs"
-                            }
+                            "ACCURACY_THRESHOLD": "0.97",
+                            "FP_RATE_EMERGENCY_THRESHOLD": "0.05",
+                            "LATENCY_BUDGET_MS": "1000"
                           },
                           "ProcessingInputs": [
                             {
@@ -1142,9 +1058,7 @@
                                   }
                                 }
                               },
-                              "RightValue": {
-                                "Get": "Parameters.AccuracyThreshold"
-                              },
+                              "RightValue": 0.97,
                               "Type": "ConditionGreaterThanOrEqualTo"
                             },
                             {
@@ -1156,9 +1070,7 @@
                                   }
                                 }
                               },
-                              "RightValue": {
-                                "Get": "Parameters.FpRateEmergencyThreshold"
-                              },
+                              "RightValue": 0.05,
                               "Type": "ConditionLessThanOrEqualTo"
                             },
                             {
@@ -1170,9 +1082,7 @@
                                   }
                                 }
                               },
-                              "RightValue": {
-                                "Get": "Parameters.LatencyBudgetMs"
-                              },
+                              "RightValue": 1000,
                               "Type": "ConditionLessThanOrEqualTo"
                             }
                           ],

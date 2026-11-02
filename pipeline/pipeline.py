@@ -129,13 +129,10 @@ def build_parameters(config: Mapping[str, Any], brand: Brand) -> list[dict[str, 
             "Brand-specific SageMaker Model Registry package group.",
         ),
         ("RecencyMonths", selection["recency_months"], "Maximum image age to select."),
-        (
-            "MinImagesPerClass",
-            selection["min_images_per_class"],
-            "Minimum images required in each retained class.",
-        ),
-        ("TargetDatasetMin", selection["target_dataset_min"], "Minimum accepted dataset size."),
-        ("TargetDatasetMax", selection["target_dataset_max"], "Maximum accepted dataset size."),
+        # NOTE: MinImagesPerClass, TargetDatasetMin, and TargetDatasetMax are deliberately
+        # NOT exposed as pipeline parameters. They are safety-critical gate thresholds and
+        # are baked as literal RightValues into the DatasetBoundsGate at definition-build
+        # time so that StartPipelineExecution PipelineParameters cannot relax them.
         ("BackboneSource", embedding["backbone_source"], "Embedding backbone provenance."),
         (
             "BackboneModelPath",
@@ -150,11 +147,9 @@ def build_parameters(config: Mapping[str, Any], brand: Brand) -> list[dict[str, 
         ),
         ("KFoldCount", kfold["n_folds"], "Number of cross-validation folds."),
         ("Classifier", kfold["classifier"], "Classifier implementation used for training."),
-        (
-            "CleanlabFlagThresholdFraction",
-            cleanlab["flag_threshold_fraction"],
-            "Maximum tolerated fraction of Cleanlab label-quality flags.",
-        ),
+        # NOTE: CleanlabFlagThresholdFraction is deliberately NOT exposed as a pipeline
+        # parameter -- it is baked as the literal RightValue of CleanlabQualityGate so
+        # callers of StartPipelineExecution cannot relax the label-quality floor.
         ("TrainingInstanceType", training["instance_type"], "SageMaker training instance type."),
         (
             "ProcessingInstanceType",
@@ -171,33 +166,24 @@ def build_parameters(config: Mapping[str, Any], brand: Brand) -> list[dict[str, 
             "Epoch interval for persisted training checkpoints.",
         ),
         ("ImageSize", training["image_size"], "Square input image size in pixels."),
-        ("AccuracyThreshold", evaluation["accuracy_threshold"], "Minimum accepted accuracy."),
-        (
-            "FpRateEmergencyThreshold",
-            evaluation["fp_rate_emergency_threshold"],
-            "Maximum accepted emergency false-positive rate.",
-        ),
-        ("LatencyBudgetMs", evaluation["latency_budget_ms"], "Maximum accepted inference latency."),
+        # NOTE: AccuracyThreshold, FpRateEmergencyThreshold, and LatencyBudgetMs are
+        # deliberately NOT exposed as pipeline parameters. They are baked as literal
+        # RightValues into EvaluateModelQualityGate so that a caller with
+        # sagemaker:StartPipelineExecution cannot override and bypass the model-release
+        # safety gates.
         (
             "ConfidenceBaseline",
             drift["confidence_baseline"],
             "Reference confidence level for drift detection.",
         ),
         (
-            "Level1ConfidenceFloor",
-            drift["level1_confidence_floor"],
-            "Level 1 intervention confidence floor.",
-        ),
-        (
             "Level2ConfidenceThreshold",
             drift["level2_confidence_threshold"],
             "Level 2 escalation confidence threshold.",
         ),
-        (
-            "CorrectionRateMultiplier",
-            drift["correction_rate_multiplier"],
-            "Correction-rate multiplier that triggers drift action.",
-        ),
+        # NOTE: Level1ConfidenceFloor and CorrectionRateMultiplier are deliberately NOT
+        # exposed as pipeline parameters -- they are baked as literal RightValues into
+        # DriftGate so the drift safety gate is immutable per execution.
         ("ReviewTopicArn", notifications["review_topic_arn"], "Human review notification topic."),
         ("MlLeadTopicArn", notifications["ml_lead_topic_arn"], "ML lead notification topic."),
         (
@@ -241,6 +227,17 @@ def _s3_uri(bucket_parameter: str, *parts: str) -> dict[str, Any]:
 
 def _environment(*pairs: tuple[str, str]) -> dict[str, Any]:
     return {key: _ref(parameter) for key, parameter in pairs}
+
+
+def _literal_env_value(value: Any) -> str:
+    """Serialise a safety-critical config literal as the string a container will see.
+
+    Booleans are emitted as ``"true"``/``"false"`` to match the SageMaker pipeline
+    Parameter rendering they replace; everything else is passed through ``str``.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
 
 
 def _processing_step(
@@ -331,15 +328,25 @@ def build_dry_run_definition(
                 },
             },
         ],
-        _environment(
-            ("BRAND_ID", "BrandId"),
-            ("NAMING_PATTERN", "BrandNamingPattern"),
-            ("RECENCY_MONTHS", "RecencyMonths"),
-            ("MIN_IMAGES_PER_CLASS", "MinImagesPerClass"),
-            ("TARGET_DATASET_MIN", "TargetDatasetMin"),
-            ("TARGET_DATASET_MAX", "TargetDatasetMax"),
-            ("SEED", "Seed"),
-        ),
+        {
+            **_environment(
+                ("BRAND_ID", "BrandId"),
+                ("NAMING_PATTERN", "BrandNamingPattern"),
+                ("RECENCY_MONTHS", "RecencyMonths"),
+                ("SEED", "Seed"),
+            ),
+            # Safety-critical dataset bounds are injected as literals so a per-execution
+            # PipelineParameters override cannot change the in-container computation.
+            "MIN_IMAGES_PER_CLASS": _literal_env_value(
+                config["data_selection"]["min_images_per_class"]
+            ),
+            "TARGET_DATASET_MIN": _literal_env_value(
+                config["data_selection"]["target_dataset_min"]
+            ),
+            "TARGET_DATASET_MAX": _literal_env_value(
+                config["data_selection"]["target_dataset_max"]
+            ),
+        },
         [
             {
                 "PropertyFileName": "SelectionMetrics",
@@ -415,12 +422,18 @@ def build_dry_run_definition(
                 },
             },
         ],
-        _environment(
-            ("KFOLD_COUNT", "KFoldCount"),
-            ("CLASSIFIER", "Classifier"),
-            ("CLEANLAB_FLAG_THRESHOLD_FRACTION", "CleanlabFlagThresholdFraction"),
-            ("SEED", "Seed"),
-        ),
+        {
+            **_environment(
+                ("KFOLD_COUNT", "KFoldCount"),
+                ("CLASSIFIER", "Classifier"),
+                ("SEED", "Seed"),
+            ),
+            # Safety-critical Cleanlab label-quality floor is injected as a literal so a
+            # per-execution override cannot relax the in-container flagging budget.
+            "CLEANLAB_FLAG_THRESHOLD_FRACTION": _literal_env_value(
+                config["cleanlab"]["flag_threshold_fraction"]
+            ),
+        },
         [
             {
                 "PropertyFileName": "QualityMetrics",
@@ -454,12 +467,20 @@ def build_dry_run_definition(
                 },
             }
         ],
-        _environment(
-            ("CONFIDENCE_BASELINE", "ConfidenceBaseline"),
-            ("LEVEL1_CONFIDENCE_FLOOR", "Level1ConfidenceFloor"),
-            ("LEVEL2_CONFIDENCE_THRESHOLD", "Level2ConfidenceThreshold"),
-            ("CORRECTION_RATE_MULTIPLIER", "CorrectionRateMultiplier"),
-        ),
+        {
+            **_environment(
+                ("CONFIDENCE_BASELINE", "ConfidenceBaseline"),
+                ("LEVEL2_CONFIDENCE_THRESHOLD", "Level2ConfidenceThreshold"),
+            ),
+            # Safety-critical drift thresholds are injected as literals so a per-execution
+            # override cannot relax the in-container drift computation that feeds DriftGate.
+            "LEVEL1_CONFIDENCE_FLOOR": _literal_env_value(
+                config["drift"]["level1_confidence_floor"]
+            ),
+            "CORRECTION_RATE_MULTIPLIER": _literal_env_value(
+                config["drift"]["correction_rate_multiplier"]
+            ),
+        },
         [
             {
                 "PropertyFileName": "DriftMetrics",
@@ -547,11 +568,20 @@ def build_dry_run_definition(
                 },
             }
         ],
-        _environment(
-            ("ACCURACY_THRESHOLD", "AccuracyThreshold"),
-            ("FP_RATE_EMERGENCY_THRESHOLD", "FpRateEmergencyThreshold"),
-            ("LATENCY_BUDGET_MS", "LatencyBudgetMs"),
-        ),
+        {
+            # Safety-critical evaluation thresholds are injected as literals so a
+            # per-execution PipelineParameters override cannot change the in-container
+            # evaluation output that feeds EvaluateModelQualityGate.
+            "ACCURACY_THRESHOLD": _literal_env_value(
+                config["evaluation"]["accuracy_threshold"]
+            ),
+            "FP_RATE_EMERGENCY_THRESHOLD": _literal_env_value(
+                config["evaluation"]["fp_rate_emergency_threshold"]
+            ),
+            "LATENCY_BUDGET_MS": _literal_env_value(
+                config["evaluation"]["latency_budget_ms"]
+            ),
+        },
         [
             {
                 "PropertyFileName": "EvaluationMetrics",
@@ -639,19 +669,19 @@ def build_dry_run_definition(
                 {
                     "Type": "ConditionGreaterThanOrEqualTo",
                     "LeftValue": _step_ref("EvaluateModel", "EvaluationMetrics", "accuracy"),
-                    "RightValue": _ref("AccuracyThreshold"),
+                    "RightValue": config["evaluation"]["accuracy_threshold"],
                 },
                 {
                     "Type": "ConditionLessThanOrEqualTo",
                     "LeftValue": _step_ref(
                         "EvaluateModel", "EvaluationMetrics", "emergency_false_positive_rate"
                     ),
-                    "RightValue": _ref("FpRateEmergencyThreshold"),
+                    "RightValue": config["evaluation"]["fp_rate_emergency_threshold"],
                 },
                 {
                     "Type": "ConditionLessThanOrEqualTo",
                     "LeftValue": _step_ref("EvaluateModel", "EvaluationMetrics", "latency_ms"),
-                    "RightValue": _ref("LatencyBudgetMs"),
+                    "RightValue": config["evaluation"]["latency_budget_ms"],
                 },
             ],
             "IfSteps": [register_model],
@@ -666,14 +696,14 @@ def build_dry_run_definition(
                 {
                     "Type": "ConditionGreaterThanOrEqualTo",
                     "LeftValue": _step_ref("DetectDrift", "DriftMetrics", "confidence"),
-                    "RightValue": _ref("Level1ConfidenceFloor"),
+                    "RightValue": config["drift"]["level1_confidence_floor"],
                 },
                 {
                     "Type": "ConditionLessThanOrEqualTo",
                     "LeftValue": _step_ref(
                         "DetectDrift", "DriftMetrics", "correction_rate_multiplier"
                     ),
-                    "RightValue": _ref("CorrectionRateMultiplier"),
+                    "RightValue": config["drift"]["correction_rate_multiplier"],
                 },
             ],
             "IfSteps": [train_model, evaluate_model, evaluation_gate],
@@ -690,7 +720,7 @@ def build_dry_run_definition(
                     "LeftValue": _step_ref(
                         "KFoldCleanlabQuality", "QualityMetrics", "flagged_fraction"
                     ),
-                    "RightValue": _ref("CleanlabFlagThresholdFraction"),
+                    "RightValue": config["cleanlab"]["flag_threshold_fraction"],
                 }
             ],
             "IfSteps": [detect_drift, drift_gate],
@@ -707,21 +737,21 @@ def build_dry_run_definition(
                     "LeftValue": _step_ref(
                         "SelectRecentBrandData", "SelectionMetrics", "dataset_size"
                     ),
-                    "RightValue": _ref("TargetDatasetMin"),
+                    "RightValue": config["data_selection"]["target_dataset_min"],
                 },
                 {
                     "Type": "ConditionLessThanOrEqualTo",
                     "LeftValue": _step_ref(
                         "SelectRecentBrandData", "SelectionMetrics", "dataset_size"
                     ),
-                    "RightValue": _ref("TargetDatasetMax"),
+                    "RightValue": config["data_selection"]["target_dataset_max"],
                 },
                 {
                     "Type": "ConditionGreaterThanOrEqualTo",
                     "LeftValue": _step_ref(
                         "SelectRecentBrandData", "SelectionMetrics", "minimum_class_count"
                     ),
-                    "RightValue": _ref("MinImagesPerClass"),
+                    "RightValue": config["data_selection"]["min_images_per_class"],
                 },
             ],
             "IfSteps": [embed_and_deduplicate, label_quality, cleanlab_gate],
@@ -825,9 +855,32 @@ def validate_dry_run_definition(definition: Mapping[str, Any]) -> None:
         raise ValueError("Local DAG contains duplicate step names")
 
     parameters = {item["Name"]: item for item in definition.get("Parameters", [])}
-    for parameter in ("BrandId", "ModelPackageGroup", "AccuracyThreshold", "UseSpot", "Seed"):
+    for parameter in ("BrandId", "ModelPackageGroup", "UseSpot", "Seed"):
         if parameter not in parameters:
             raise ValueError(f"Local DAG is missing required parameter: {parameter}")
+    # Safety-critical gate thresholds must NEVER appear as execution parameters, since
+    # SageMaker PipelineParameters are overridable per-execution via
+    # StartPipelineExecution. They must be baked into the Condition steps as literal
+    # RightValues instead.
+    _forbidden_gate_parameters = (
+        "AccuracyThreshold",
+        "FpRateEmergencyThreshold",
+        "LatencyBudgetMs",
+        "CleanlabFlagThresholdFraction",
+        "Level1ConfidenceFloor",
+        "CorrectionRateMultiplier",
+        "TargetDatasetMin",
+        "TargetDatasetMax",
+        "MinImagesPerClass",
+    )
+    forbidden_present = sorted(name for name in _forbidden_gate_parameters if name in parameters)
+    if forbidden_present:
+        raise ValueError(
+            "Safety-critical gate thresholds must not be exposed as pipeline parameters: "
+            f"{forbidden_present}"
+        )
+
+    _validate_gate_right_values(definition)
 
     register_step = next(
         step
@@ -837,6 +890,101 @@ def validate_dry_run_definition(definition: Mapping[str, Any]) -> None:
     status = register_step["Arguments"].get("ModelApprovalStatus")
     if status != "PendingManualApproval":
         raise ValueError("Registered models must remain PendingManualApproval")
+
+
+# Policy-approved ranges for the safety-critical gate RightValues. These are
+# inclusive bounds that any brand-overlay configuration must stay within. They are
+# the ultimate backstop against a definition-build-time overlay accidentally (or
+# maliciously) relaxing a safety gate even when the gate is now a literal rather
+# than an execution parameter.
+_GATE_RIGHT_VALUE_POLICY: dict[tuple[str, str, str], tuple[float, float]] = {
+    ("EvaluateModelQualityGate", "accuracy", "ConditionGreaterThanOrEqualTo"): (0.90, 1.0),
+    (
+        "EvaluateModelQualityGate",
+        "emergency_false_positive_rate",
+        "ConditionLessThanOrEqualTo",
+    ): (0.0, 0.10),
+    ("EvaluateModelQualityGate", "latency_ms", "ConditionLessThanOrEqualTo"): (1.0, 5_000.0),
+    ("DriftGate", "confidence", "ConditionGreaterThanOrEqualTo"): (0.50, 1.0),
+    ("DriftGate", "correction_rate_multiplier", "ConditionLessThanOrEqualTo"): (1.0, 10.0),
+    ("CleanlabQualityGate", "flagged_fraction", "ConditionLessThanOrEqualTo"): (0.0, 0.10),
+    ("DatasetBoundsGate", "dataset_size:min", "ConditionGreaterThanOrEqualTo"): (1.0, 1_000_000.0),
+    ("DatasetBoundsGate", "dataset_size:max", "ConditionLessThanOrEqualTo"): (1.0, 10_000_000.0),
+    ("DatasetBoundsGate", "minimum_class_count", "ConditionGreaterThanOrEqualTo"): (1.0, 100_000.0),
+}
+
+
+def _left_value_json_path(left_value: Mapping[str, Any]) -> str | None:
+    json_get = left_value.get("Std:JsonGet") if isinstance(left_value, Mapping) else None
+    if not isinstance(json_get, Mapping):
+        return None
+    path = json_get.get("Path")
+    return path if isinstance(path, str) else None
+
+
+def _validate_gate_right_values(definition: Mapping[str, Any]) -> None:
+    """Assert that every safety gate's RightValue is a literal in its policy range.
+
+    SageMaker Condition steps compare a step-produced LeftValue against a RightValue.
+    A RightValue that is a ``{"Get": "Parameters.*"}`` reference is caller-overridable
+    at StartPipelineExecution time and therefore cannot carry a safety guarantee.
+    This check enforces that every gate RightValue is a plain number baked into the
+    definition, and that the number falls within the policy-approved range.
+    """
+    seen: set[tuple[str, str, str]] = set()
+    for step in _walk_steps(definition.get("Steps", [])):
+        if step.get("Type") != "Condition":
+            continue
+        step_name = step.get("Name", "<unnamed>")
+        conditions = step.get("Arguments", {}).get("Conditions", [])
+        # Track per-gate occurrences so we can distinguish the two dataset-size bounds
+        # (min vs max) which share the same JSON path.
+        occurrences: dict[tuple[str, str], int] = {}
+        for condition in conditions:
+            condition_type = condition.get("Type", "")
+            json_path = _left_value_json_path(condition.get("LeftValue", {}))
+            right_value = condition.get("RightValue")
+            if isinstance(right_value, Mapping):
+                raise ValueError(
+                    f"Gate {step_name!r} RightValue for {json_path!r} must be a literal "
+                    f"number, not a reference: {dict(right_value)!r}. "
+                    "Safety-critical thresholds must not be caller-overridable pipeline "
+                    "parameters."
+                )
+            if isinstance(right_value, bool) or not isinstance(right_value, (int, float)):
+                raise ValueError(
+                    f"Gate {step_name!r} RightValue for {json_path!r} must be a number; "
+                    f"got {right_value!r}"
+                )
+            if json_path is None:
+                # Unknown shape; still require a numeric literal (already checked) but
+                # skip range enforcement.
+                continue
+            lookup_path = json_path
+            if step_name == "DatasetBoundsGate" and json_path == "dataset_size":
+                occurrences[(step_name, json_path)] = occurrences.get((step_name, json_path), 0) + 1
+                suffix = "min" if occurrences[(step_name, json_path)] == 1 else "max"
+                lookup_path = f"dataset_size:{suffix}"
+            key = (step_name, lookup_path, condition_type)
+            policy = _GATE_RIGHT_VALUE_POLICY.get(key)
+            if policy is None:
+                # No policy declared for this gate/path/comparator -- leave the literal
+                # check in place but do not range-enforce.
+                continue
+            low, high = policy
+            if not (low <= float(right_value) <= high):
+                raise ValueError(
+                    f"Gate {step_name!r} RightValue for {json_path!r} ({right_value}) is "
+                    f"outside policy-approved range [{low}, {high}]"
+                )
+            seen.add(key)
+
+    missing_policies = set(_GATE_RIGHT_VALUE_POLICY).difference(seen)
+    if missing_policies:
+        raise ValueError(
+            "Safety gate(s) missing required Condition(s): "
+            f"{sorted(missing_policies)}"
+        )
 
 
 def render_dry_run_json(
