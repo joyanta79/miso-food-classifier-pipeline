@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -28,9 +27,15 @@ OUTPUT = Path(os.getenv("SM_OUTPUT_DATA_DIR", "/opt/ml/output/data"))
 WORK = Path("/tmp/miso_train")
 EPOCHS = int(os.getenv("MISO_EPOCHS", "3"))
 
+# The shared bootstrap enforces --require-hashes / --no-deps and a pinned
+# private index, and refuses to resolve bare names from the public PyPI.
+sys.path.insert(0, str(CODE / "pipeline" / "steps"))
+import _bootstrap  # noqa: E402
 
-def _pip(*pkgs: str) -> None:
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-input", *pkgs], check=False)
+
+def _pip(packages: dict[str, str]) -> None:
+    """Hash-pinned, index-restricted install via ``_bootstrap.ensure``."""
+    _bootstrap.ensure(packages)
 
 
 def _label_from_name(name: str) -> str | None:
@@ -62,7 +67,7 @@ def arrange(raw: Path, work: Path) -> dict[str, int]:
 
 
 def main() -> int:
-    _pip("pyyaml", "pillow")
+    _pip({"yaml": "pyyaml", "PIL": "pillow"})
     sys.path.insert(0, str(CODE))
     from training.train import train_model
 

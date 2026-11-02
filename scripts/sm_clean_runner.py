@@ -12,7 +12,6 @@ the smoke dataset, exactly as the local end-to-end driver does.
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 from datetime import datetime, timezone
 
@@ -23,18 +22,35 @@ IN = Path("/opt/ml/processing/input")
 CODE = Path("/opt/ml/processing/input/code")
 OUT = Path("/opt/ml/processing/output")
 
+# The shared bootstrap enforces --require-hashes / --no-deps and a pinned
+# private index, and refuses to resolve bare names from the public PyPI.
+sys.path.insert(0, str(CODE / "pipeline" / "steps"))
+import _bootstrap  # noqa: E402
 
-def _pip(*pkgs: str) -> None:
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-q", "--no-input", *pkgs],
-        check=False,
-    )
+
+def _pip(packages: dict[str, str]) -> None:
+    """Hash-pinned, index-restricted install via ``_bootstrap.ensure``.
+
+    Accepts an ``import_name -> pip requirement`` mapping so callers declare
+    exactly which module they need; the actual resolve is driven by the
+    hash-locked requirements.lock the operator mounts into the job.
+    """
+    _bootstrap.ensure(packages)
 
 
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
-    # Runtime deps not guaranteed in the base DLC image.
-    _pip("scikit-learn", "xgboost", "cleanlab", "pillow")
+    # Runtime deps not guaranteed in the base DLC image. The install only
+    # happens when a hash-locked requirements file + pinned index are
+    # configured; see pipeline/steps/_bootstrap.py.
+    _pip(
+        {
+            "sklearn": "scikit-learn",
+            "xgboost": "xgboost",
+            "cleanlab": "cleanlab",
+            "PIL": "pillow",
+        }
+    )
 
     sys.path.insert(0, str(CODE))
     from processing.step0_data_selection import select_data
