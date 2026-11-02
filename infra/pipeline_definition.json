@@ -193,6 +193,30 @@
       "Type": "Integer"
     },
     {
+      "DefaultValue": "done",
+      "Description": "Name of the done/positive class used by the emergency FP metric.",
+      "Name": "DoneLabel",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": "not_done",
+      "Description": "Name of the not_done/hazardous class used by the emergency FP metric.",
+      "Name": "NotDoneLabel",
+      "Type": "String"
+    },
+    {
+      "DefaultValue": 100,
+      "Description": "Minimum evaluated sample count accepted by the EvaluateModelQualityGate.",
+      "Name": "EvaluationMinSampleCount",
+      "Type": "Integer"
+    },
+    {
+      "DefaultValue": 50,
+      "Description": "Minimum per-class evaluated sample count accepted by the EvaluateModelQualityGate.",
+      "Name": "EvaluationMinPerClassCount",
+      "Type": "Integer"
+    },
+    {
       "DefaultValue": 0.85,
       "Description": "Reference confidence level for drift detection.",
       "Name": "ConfidenceBaseline",
@@ -1034,11 +1058,23 @@
                             "ACCURACY_THRESHOLD": {
                               "Get": "Parameters.AccuracyThreshold"
                             },
+                            "DONE_LABEL": {
+                              "Get": "Parameters.DoneLabel"
+                            },
                             "FP_RATE_EMERGENCY_THRESHOLD": {
                               "Get": "Parameters.FpRateEmergencyThreshold"
                             },
                             "LATENCY_BUDGET_MS": {
                               "Get": "Parameters.LatencyBudgetMs"
+                            },
+                            "MIN_PER_CLASS_COUNT": {
+                              "Get": "Parameters.EvaluationMinPerClassCount"
+                            },
+                            "MIN_SAMPLE_COUNT": {
+                              "Get": "Parameters.EvaluationMinSampleCount"
+                            },
+                            "NOT_DONE_LABEL": {
+                              "Get": "Parameters.NotDoneLabel"
                             }
                           },
                           "ProcessingInputs": [
@@ -1173,6 +1209,60 @@
                               "RightValue": {
                                 "Get": "Parameters.LatencyBudgetMs"
                               },
+                              "Type": "ConditionLessThanOrEqualTo"
+                            },
+                            {
+                              "LeftValue": {
+                                "Std:JsonGet": {
+                                  "Path": "sample_count",
+                                  "PropertyFile": {
+                                    "Get": "Steps.EvaluateModel.PropertyFiles.EvaluationMetrics"
+                                  }
+                                }
+                              },
+                              "RightValue": {
+                                "Get": "Parameters.EvaluationMinSampleCount"
+                              },
+                              "Type": "ConditionGreaterThanOrEqualTo"
+                            },
+                            {
+                              "LeftValue": {
+                                "Std:JsonGet": {
+                                  "Path": "not_done_sample_count",
+                                  "PropertyFile": {
+                                    "Get": "Steps.EvaluateModel.PropertyFiles.EvaluationMetrics"
+                                  }
+                                }
+                              },
+                              "RightValue": {
+                                "Get": "Parameters.EvaluationMinPerClassCount"
+                              },
+                              "Type": "ConditionGreaterThanOrEqualTo"
+                            },
+                            {
+                              "LeftValue": {
+                                "Std:JsonGet": {
+                                  "Path": "done_sample_count",
+                                  "PropertyFile": {
+                                    "Get": "Steps.EvaluateModel.PropertyFiles.EvaluationMetrics"
+                                  }
+                                }
+                              },
+                              "RightValue": {
+                                "Get": "Parameters.EvaluationMinPerClassCount"
+                              },
+                              "Type": "ConditionGreaterThanOrEqualTo"
+                            },
+                            {
+                              "LeftValue": {
+                                "Std:JsonGet": {
+                                  "Path": "missing_images",
+                                  "PropertyFile": {
+                                    "Get": "Steps.EvaluateModel.PropertyFiles.EvaluationMetrics"
+                                  }
+                                }
+                              },
+                              "RightValue": 0,
                               "Type": "ConditionLessThanOrEqualTo"
                             }
                           ],

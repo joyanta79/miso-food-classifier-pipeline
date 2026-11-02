@@ -2,18 +2,21 @@
 
 Evaluates the trained Keras model (from the training step's model.tar.gz) on the
 cleaned image set and emits an evaluation ``metrics.json`` consumed by the
-EvaluateModelQualityGate:
+EvaluateModelQualityGate.
 
-    {
-      "accuracy": <float>,
-      "emergency_false_positive_rate": <float>,
-      "latency_ms": <float>
-    }
+The emergency false-positive rate is the hazardous direction defined by
+processing/step6_evaluate.py and processing/step7_register_and_baseline.py:
+truly-``not_done`` images predicted as ``done``. The reference class names are
+taken from CLI arguments (``--done-label`` / ``--not-done-label``) or the
+``DONE_LABEL`` / ``NOT_DONE_LABEL`` environment variables, defaulting to
+``done`` / ``not_done`` -- never from alphabetical order.
 
-The model is a fine-tuned EfficientNetV2 classifier saved by train.py. This step
-arranges the cleaned images by class, runs inference, and computes accuracy, an
-emergency false-positive rate (treating the first class alphabetically as the
-"safe/negative" reference), and mean per-image latency.
+The step fails closed: if any configured image file is missing, if the evaluated
+sample count or the per-class counts fall below the configured floors, or if the
+``not_done`` reference class contributes no evaluated samples, the step writes a
+``metrics.json`` containing values the EvaluateModelQualityGate must reject
+(``accuracy=0.0``, ``emergency_false_positive_rate=1.0``) and exits non-zero so
+the SageMaker pipeline run fails before the gate is consulted.
 
 Python 3.10 compatible.
 """
@@ -34,6 +37,47 @@ import _bootstrap  # noqa: E402
 _bootstrap.ensure({"PIL": "pillow", "numpy": "numpy"})
 
 import numpy as np
+
+
+# Sentinel metric values guaranteed to fail the EvaluateModelQualityGate
+# (accuracy >= AccuracyThreshold and emergency_false_positive_rate
+# <= FpRateEmergencyThreshold). Written whenever the step aborts fail-closed.
+_FAIL_ACCURACY = 0.0
+_FAIL_FP_RATE = 1.0
+
+
+def _write_metrics(metrics_out: Path, metrics: dict) -> None:
+    metrics_out.mkdir(parents=True, exist_ok=True)
+    (metrics_out / "metrics.json").write_text(
+        json.dumps(metrics, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def _abort(metrics_out: Path, reason: str, extra: dict) -> None:
+    """Write a gate-failing metrics.json and exit non-zero."""
+    metrics = {
+        "accuracy": _FAIL_ACCURACY,
+        "emergency_false_positive_rate": _FAIL_FP_RATE,
+        "latency_ms": 0.0,
+        "sample_count": int(extra.get("sample_count", 0)),
+        "not_done_sample_count": int(extra.get("not_done_sample_count", 0)),
+        "done_sample_count": int(extra.get("done_sample_count", 0)),
+        "missing_images": int(extra.get("missing_images", 0)),
+        "classes": list(extra.get("classes", [])),
+        "abort_reason": reason,
+    }
+    _write_metrics(metrics_out, metrics)
+    print(f"[evaluation] ABORT: {reason}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _positive_int(value, default: int) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _load_model(model_dir: Path):
@@ -59,7 +103,33 @@ def main() -> None:
         "--cleaned", default="/opt/ml/processing/input/dataset/cleaned_dataset.json"
     )
     parser.add_argument("--metrics-out", default="/opt/ml/processing/output/metrics")
+    parser.add_argument(
+        "--done-label",
+        default=os.environ.get("DONE_LABEL", "done"),
+        help="Name of the done/safe/positive class.",
+    )
+    parser.add_argument(
+        "--not-done-label",
+        default=os.environ.get("NOT_DONE_LABEL", "not_done"),
+        help="Name of the not_done/unsafe class (hazardous prediction direction).",
+    )
+    parser.add_argument(
+        "--min-sample-count",
+        type=int,
+        default=_positive_int(os.environ.get("MIN_SAMPLE_COUNT"), 1),
+        help="Minimum evaluated samples; below this the step fails closed.",
+    )
+    parser.add_argument(
+        "--min-per-class-count",
+        type=int,
+        default=_positive_int(os.environ.get("MIN_PER_CLASS_COUNT"), 1),
+        help="Minimum evaluated samples per labelled class; below this the step fails closed.",
+    )
     args = parser.parse_args()
+
+    metrics_out = Path(args.metrics_out)
+    done_label = args.done_label
+    not_done_label = args.not_done_label
 
     import tensorflow as tf
     from PIL import Image
@@ -78,17 +148,43 @@ def main() -> None:
     cleaned = json.loads(Path(args.cleaned).read_text(encoding="utf-8"))
     labels_sorted = sorted({record["label"] for record in cleaned})
     class_index = {label: i for i, label in enumerate(labels_sorted)}
-    safe_label = labels_sorted[0]  # alphabetical first = reference "negative" class
+
+    # Explicit label semantics: refuse to proceed if the hazardous reference
+    # class or the positive class is missing from the dataset. Alphabetical
+    # ordering is NOT used to pick the safety direction.
+    if not_done_label not in class_index:
+        _abort(
+            metrics_out,
+            (
+                f"not_done label {not_done_label!r} is not present in dataset classes "
+                f"{labels_sorted!r}; cannot measure the hazardous false-positive direction."
+            ),
+            {"classes": labels_sorted},
+        )
+    if done_label not in class_index:
+        _abort(
+            metrics_out,
+            (
+                f"done label {done_label!r} is not present in dataset classes "
+                f"{labels_sorted!r}."
+            ),
+            {"classes": labels_sorted},
+        )
 
     images_root = Path(args.images)
     correct = 0
     total = 0
-    false_positives = 0
-    negatives = 0
-    latencies = []
+    false_positives = 0  # truly not_done predicted as done (hazardous direction)
+    not_done_evaluated = 0
+    done_evaluated = 0
+    missing_images = 0
+    latencies: list[float] = []
     for record in cleaned:
         path = images_root / record["image_path"]
         if not path.exists():
+            # Count missing files instead of silently dropping records; the step
+            # aborts below when missing_images > 0.
+            missing_images += 1
             continue
         with Image.open(path) as handle:
             arr = np.asarray(
@@ -99,18 +195,80 @@ def main() -> None:
         probs = model.predict(x, verbose=0)[0]
         latencies.append((time.perf_counter() - started) * 1000)
         pred_idx = int(np.argmax(probs))
-        true_idx = class_index[record["label"]]
+        true_label = record["label"]
+        if true_label not in class_index:
+            _abort(
+                metrics_out,
+                f"record label {true_label!r} not in known classes {labels_sorted!r}",
+                {
+                    "classes": labels_sorted,
+                    "sample_count": total,
+                    "not_done_sample_count": not_done_evaluated,
+                    "done_sample_count": done_evaluated,
+                    "missing_images": missing_images,
+                },
+            )
+        true_idx = class_index[true_label]
         total += 1
         if pred_idx == true_idx:
             correct += 1
-        # Emergency FP: a truly-safe image predicted as a non-safe class.
-        if record["label"] == safe_label:
-            negatives += 1
-            if pred_idx != class_index[safe_label]:
+        # Emergency FP: truly-not_done image predicted as done (hazardous direction).
+        if true_label == not_done_label:
+            not_done_evaluated += 1
+            if pred_idx == class_index[done_label]:
                 false_positives += 1
+        elif true_label == done_label:
+            done_evaluated += 1
 
-    accuracy = correct / total if total else 0.0
-    emergency_fp_rate = false_positives / negatives if negatives else 0.0
+    extras = {
+        "classes": labels_sorted,
+        "sample_count": total,
+        "not_done_sample_count": not_done_evaluated,
+        "done_sample_count": done_evaluated,
+        "missing_images": missing_images,
+    }
+
+    # Fail closed on dataset-shrinking manipulation or vacuous evaluation.
+    if missing_images > 0:
+        _abort(
+            metrics_out,
+            (
+                f"{missing_images} cleaned_dataset records had no matching image under the "
+                f"images channel; refusing to publish metrics computed over a filtered subset."
+            ),
+            extras,
+        )
+    if total < args.min_sample_count:
+        _abort(
+            metrics_out,
+            (
+                f"evaluated sample_count={total} is below the configured floor "
+                f"min_sample_count={args.min_sample_count}."
+            ),
+            extras,
+        )
+    if not_done_evaluated < args.min_per_class_count:
+        _abort(
+            metrics_out,
+            (
+                f"not_done evaluated samples={not_done_evaluated} is below "
+                f"min_per_class_count={args.min_per_class_count}; cannot produce an "
+                f"emergency_false_positive_rate without hazardous-class samples."
+            ),
+            extras,
+        )
+    if done_evaluated < args.min_per_class_count:
+        _abort(
+            metrics_out,
+            (
+                f"done evaluated samples={done_evaluated} is below "
+                f"min_per_class_count={args.min_per_class_count}."
+            ),
+            extras,
+        )
+
+    accuracy = correct / total
+    emergency_fp_rate = false_positives / not_done_evaluated
     latency_ms = float(np.mean(latencies)) if latencies else 0.0
 
     metrics = {
@@ -118,16 +276,17 @@ def main() -> None:
         "emergency_false_positive_rate": emergency_fp_rate,
         "latency_ms": latency_ms,
         "sample_count": total,
+        "not_done_sample_count": not_done_evaluated,
+        "done_sample_count": done_evaluated,
+        "missing_images": missing_images,
         "classes": labels_sorted,
     }
-    metrics_out = Path(args.metrics_out)
-    metrics_out.mkdir(parents=True, exist_ok=True)
-    (metrics_out / "metrics.json").write_text(
-        json.dumps(metrics, indent=2) + "\n", encoding="utf-8"
-    )
+    _write_metrics(metrics_out, metrics)
     print(
         f"[evaluation] accuracy={accuracy:.3f} "
-        f"emergency_fp_rate={emergency_fp_rate:.3f} latency_ms={latency_ms:.1f} n={total}"
+        f"emergency_fp_rate={emergency_fp_rate:.3f} latency_ms={latency_ms:.1f} "
+        f"n={total} not_done_n={not_done_evaluated} done_n={done_evaluated} "
+        f"missing_images={missing_images}"
     )
 
 

@@ -51,6 +51,10 @@ evaluation:
   accuracy_threshold: 0.97
   fp_rate_emergency_threshold: 0.05
   latency_budget_ms: 1000
+  done_label: done
+  not_done_label: not_done
+  min_sample_count: 100
+  min_per_class_count: 50
 drift:
   confidence_baseline: 0.85
   level1_confidence_floor: 0.65

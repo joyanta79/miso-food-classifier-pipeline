@@ -179,6 +179,26 @@ def build_parameters(config: Mapping[str, Any], brand: Brand) -> list[dict[str, 
         ),
         ("LatencyBudgetMs", evaluation["latency_budget_ms"], "Maximum accepted inference latency."),
         (
+            "DoneLabel",
+            evaluation.get("done_label", "done"),
+            "Name of the done/positive class used by the emergency FP metric.",
+        ),
+        (
+            "NotDoneLabel",
+            evaluation.get("not_done_label", "not_done"),
+            "Name of the not_done/hazardous class used by the emergency FP metric.",
+        ),
+        (
+            "EvaluationMinSampleCount",
+            evaluation.get("min_sample_count", 1),
+            "Minimum evaluated sample count accepted by the EvaluateModelQualityGate.",
+        ),
+        (
+            "EvaluationMinPerClassCount",
+            evaluation.get("min_per_class_count", 1),
+            "Minimum per-class evaluated sample count accepted by the EvaluateModelQualityGate.",
+        ),
+        (
             "ConfidenceBaseline",
             drift["confidence_baseline"],
             "Reference confidence level for drift detection.",
@@ -551,6 +571,10 @@ def build_dry_run_definition(
             ("ACCURACY_THRESHOLD", "AccuracyThreshold"),
             ("FP_RATE_EMERGENCY_THRESHOLD", "FpRateEmergencyThreshold"),
             ("LATENCY_BUDGET_MS", "LatencyBudgetMs"),
+            ("DONE_LABEL", "DoneLabel"),
+            ("NOT_DONE_LABEL", "NotDoneLabel"),
+            ("MIN_SAMPLE_COUNT", "EvaluationMinSampleCount"),
+            ("MIN_PER_CLASS_COUNT", "EvaluationMinPerClassCount"),
         ),
         [
             {
@@ -652,6 +676,34 @@ def build_dry_run_definition(
                     "Type": "ConditionLessThanOrEqualTo",
                     "LeftValue": _step_ref("EvaluateModel", "EvaluationMetrics", "latency_ms"),
                     "RightValue": _ref("LatencyBudgetMs"),
+                },
+                {
+                    "Type": "ConditionGreaterThanOrEqualTo",
+                    "LeftValue": _step_ref(
+                        "EvaluateModel", "EvaluationMetrics", "sample_count"
+                    ),
+                    "RightValue": _ref("EvaluationMinSampleCount"),
+                },
+                {
+                    "Type": "ConditionGreaterThanOrEqualTo",
+                    "LeftValue": _step_ref(
+                        "EvaluateModel", "EvaluationMetrics", "not_done_sample_count"
+                    ),
+                    "RightValue": _ref("EvaluationMinPerClassCount"),
+                },
+                {
+                    "Type": "ConditionGreaterThanOrEqualTo",
+                    "LeftValue": _step_ref(
+                        "EvaluateModel", "EvaluationMetrics", "done_sample_count"
+                    ),
+                    "RightValue": _ref("EvaluationMinPerClassCount"),
+                },
+                {
+                    "Type": "ConditionLessThanOrEqualTo",
+                    "LeftValue": _step_ref(
+                        "EvaluateModel", "EvaluationMetrics", "missing_images"
+                    ),
+                    "RightValue": 0,
                 },
             ],
             "IfSteps": [register_model],
@@ -1050,6 +1102,38 @@ def build_sagemaker_pipeline(
                     json_path="latency_ms",
                 ),
                 right=evaluation["latency_budget_ms"],
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=evaluation_step.name,
+                    property_file=evaluation_report,
+                    json_path="sample_count",
+                ),
+                right=int(evaluation.get("min_sample_count", 1)),
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=evaluation_step.name,
+                    property_file=evaluation_report,
+                    json_path="not_done_sample_count",
+                ),
+                right=int(evaluation.get("min_per_class_count", 1)),
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=evaluation_step.name,
+                    property_file=evaluation_report,
+                    json_path="done_sample_count",
+                ),
+                right=int(evaluation.get("min_per_class_count", 1)),
+            ),
+            ConditionLessThanOrEqualTo(
+                left=JsonGet(
+                    step_name=evaluation_step.name,
+                    property_file=evaluation_report,
+                    json_path="missing_images",
+                ),
+                right=0,
             ),
         ],
         if_steps=[register_step],

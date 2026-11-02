@@ -269,7 +269,17 @@ def build(config: dict, code_prefix: str, images_uri: str) -> Pipeline:
     )
     eval_step = ProcessingStep(
         name="EvaluateModel",
-        step_args=processor({"IMAGE_SIZE": str(config["training"]["image_size"])}).run(
+        step_args=processor(
+            {
+                "IMAGE_SIZE": str(config["training"]["image_size"]),
+                "DONE_LABEL": str(config["evaluation"].get("done_label", "done")),
+                "NOT_DONE_LABEL": str(config["evaluation"].get("not_done_label", "not_done")),
+                "MIN_SAMPLE_COUNT": str(config["evaluation"].get("min_sample_count", 1)),
+                "MIN_PER_CLASS_COUNT": str(
+                    config["evaluation"].get("min_per_class_count", 1)
+                ),
+            }
+        ).run(
             code=str(STEPS_DIR / "evaluation.py"),
             inputs=[
                 images_input,
@@ -339,6 +349,41 @@ def build(config: dict, code_prefix: str, images_uri: str) -> Pipeline:
                     step_name=eval_step.name, property_file=eval_metrics, json_path="latency_ms"
                 ),
                 right=config["evaluation"]["latency_budget_ms"],
+            ),
+            # Reject vacuous or dataset-shrinking evaluations. The step itself
+            # also exits non-zero in these cases, but we keep the gate conditions
+            # as defense-in-depth against a tampered metrics.json.
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=eval_step.name,
+                    property_file=eval_metrics,
+                    json_path="sample_count",
+                ),
+                right=int(config["evaluation"].get("min_sample_count", 1)),
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=eval_step.name,
+                    property_file=eval_metrics,
+                    json_path="not_done_sample_count",
+                ),
+                right=int(config["evaluation"].get("min_per_class_count", 1)),
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=eval_step.name,
+                    property_file=eval_metrics,
+                    json_path="done_sample_count",
+                ),
+                right=int(config["evaluation"].get("min_per_class_count", 1)),
+            ),
+            ConditionLessThanOrEqualTo(
+                left=JsonGet(
+                    step_name=eval_step.name,
+                    property_file=eval_metrics,
+                    json_path="missing_images",
+                ),
+                right=0,
             ),
         ],
         if_steps=[register_step],
