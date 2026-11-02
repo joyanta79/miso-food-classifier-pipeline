@@ -59,11 +59,20 @@ def select(
             continue
         label, confidence = parsed
         label_counts[label] += 1
+        # Store the path relative to the images channel root so step 1 can
+        # resolve nested keys (e.g. ``2026/01/wc_done_0.9.jpg``) as
+        # ``<image_root>/<image_path>`` rather than silently failing when the
+        # file lives under a sub-prefix and falling back to a filename hash.
+        try:
+            relative = path.relative_to(image_root)
+        except ValueError:
+            relative = Path(path.name)
+        image_path = relative.as_posix()
         manifest.append(
             {
-                "id": path.name,
-                "key": path.name,
-                "image_path": path.name,
+                "id": image_path,
+                "key": image_path,
+                "image_path": image_path,
                 "label": label,
                 "confidence": confidence,
                 "last_modified": datetime.now(UTC).isoformat(),

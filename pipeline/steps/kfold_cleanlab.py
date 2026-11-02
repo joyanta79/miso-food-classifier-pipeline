@@ -65,6 +65,22 @@ def main() -> None:
         probabilities, mapping, classes, flag_threshold_fraction=flag_threshold
     )
 
+    # Surface the deterministic-fallback count from the embedding step so the
+    # downstream CleanlabQualityGate can reject a run where any record was
+    # embedded from the filename hash rather than image pixels. Fail-closed is
+    # already enforced in ``embedding_dedup.py``; this metric lets gates that
+    # evaluate ``metrics.json`` observe the degradation directly.
+    deterministic_fallback_count = sum(
+        1 for record in mapping if record.get("embedding_backend") == "deterministic"
+    )
+    backends = sorted(
+        {record.get("embedding_backend") for record in mapping if record.get("embedding_backend")}
+    )
+    report = dict(report)
+    report["deterministic_fallback_count"] = deterministic_fallback_count
+    report["embedding_backends"] = backends
+    report["efficientnet_only"] = backends == ["efficientnet"]
+
     dataset_out = Path(args.dataset_out)
     dataset_out.mkdir(parents=True, exist_ok=True)
     (dataset_out / "cleaned_dataset.json").write_text(
