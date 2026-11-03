@@ -91,7 +91,76 @@ def select_data(
             f"Curated dataset has {len(curated)} images, "
             f"below required minimum {target_dataset_min}"
         )
-    return curated[:target_dataset_max]
+
+    # Apply the size cap as a stratified per-class quota rather than a prefix
+    # cut, so that a single attacker-chosen label cannot evict every other
+    # class from the curated manifest. See CWE-841.
+    if not eligible_labels:
+        truncated: list[dict[str, Any]] = []
+    elif len(curated) <= target_dataset_max:
+        truncated = curated
+    else:
+        num_labels = len(eligible_labels)
+        per_class_quota = target_dataset_max // num_labels
+        if per_class_quota < min_images_per_class:
+            # The cap cannot admit min_images_per_class records for every
+            # eligible class simultaneously; refuse rather than silently
+            # dropping a class.
+            raise ValueError(
+                f"target_dataset_max={target_dataset_max} too small to admit "
+                f"min_images_per_class={min_images_per_class} across "
+                f"{num_labels} eligible classes"
+            )
+        by_label: dict[str, list[dict[str, Any]]] = {}
+        for item in curated:
+            by_label.setdefault(item["label"], []).append(item)
+        # Deterministic label order (sorted) keeps selection reproducible
+        # across runs while preventing any one label from monopolising the cap.
+        label_order = sorted(by_label)
+        quotas = {label: min(per_class_quota, len(by_label[label])) for label in label_order}
+        # Distribute any remaining capacity round-robin across labels that
+        # still have records, so we fill up to target_dataset_max when possible.
+        remaining = target_dataset_max - sum(quotas.values())
+        while remaining > 0:
+            progressed = False
+            for label in label_order:
+                if remaining <= 0:
+                    break
+                if quotas[label] < len(by_label[label]):
+                    quotas[label] += 1
+                    remaining -= 1
+                    progressed = True
+            if not progressed:
+                break
+        truncated = [
+            item
+            for label in label_order
+            for item in by_label[label][: quotas[label]]
+        ]
+
+    # Re-validate the balance invariant on the actually-returned manifest.
+    final_counts = Counter(item["label"] for item in truncated)
+    expected_label_count = len(eligible_labels)
+    if len(final_counts) < expected_label_count:
+        missing = sorted(eligible_labels - set(final_counts))
+        raise ValueError(
+            f"Curated dataset lost classes after size-cap truncation: {missing}"
+        )
+    deficient = {
+        label: count
+        for label, count in final_counts.items()
+        if count < min_images_per_class
+    }
+    if deficient:
+        raise ValueError(
+            f"Curated dataset classes below min_images_per_class after truncation: {deficient}"
+        )
+    if len(truncated) < target_dataset_min:
+        raise ValueError(
+            f"Curated dataset has {len(truncated)} images after per-class quota, "
+            f"below required minimum {target_dataset_min}"
+        )
+    return truncated
 
 
 def write_manifest(records: list[dict[str, Any]], output_path: str | Path) -> None:
