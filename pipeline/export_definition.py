@@ -16,6 +16,7 @@ from pipeline.pipeline import (
     get_brand,
     load_config,
     render_dry_run_json,
+    validate_sdk_pipeline_definition,
 )
 
 DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "infra" / "pipeline_definition.json"
@@ -60,6 +61,9 @@ def main() -> int:
 
     if args.sdk:
         definition = build_sagemaker_pipeline(args.config, args.brand).definition()
+        # Fail loudly if the SDK graph has drifted from the validated local DAG
+        # before the operator writes the file / deploys it.
+        validate_sdk_pipeline_definition(definition)
         content = definition if definition.endswith("\n") else f"{definition}\n"
     else:
         content = render_dry_run_json(args.config, args.brand)
