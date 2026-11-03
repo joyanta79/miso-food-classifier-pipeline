@@ -175,7 +175,13 @@ def build_parameters(config: Mapping[str, Any], brand: Brand) -> list[dict[str, 
         ("Region", aws["region"], "AWS Region hosting this pipeline."),
         ("AccountId", aws["account_id"], "Target AWS account identifier."),
         ("BrandId", brand.id, "Fixed pipeline brand identifier."),
-        ("BrandNamingPattern", brand.naming_pattern, "Allowed raw-data filename prefix pattern."),
+        # NOTE: BrandNamingPattern is deliberately NOT exposed as a pipeline
+        # parameter. It is a safety-critical gate *input* -- the
+        # ``_expected_brand_token`` derived from it decides which raw-archive
+        # objects are attributed to this brand -- so an execution-time override
+        # would reproduce exactly the id/pattern mismatch the build-time brand
+        # cross-check exists to prevent. The literal is baked into the
+        # SelectRecentBrandData step Environment instead.
         (
             "ModelPackageGroup",
             brand.model_package_group,
@@ -186,20 +192,21 @@ def build_parameters(config: Mapping[str, Any], brand: Brand) -> list[dict[str, 
         # NOT exposed as pipeline parameters. They are safety-critical gate thresholds and
         # are baked as literal RightValues into the DatasetBoundsGate at definition-build
         # time so that StartPipelineExecution PipelineParameters cannot relax them.
-        ("BackboneSource", embedding["backbone_source"], "Embedding backbone provenance."),
         (
             "BackboneModelPath",
             embedding["backbone_model_path"],
             "Prior-production backbone path used for embeddings.",
         ),
-        ("EmbeddingDim", embedding["embedding_dim"], "Embedding vector dimensionality."),
-        (
-            "CosineDedupThreshold",
-            embedding["cosine_dedup_threshold"],
-            "Cosine similarity above which an image is deduplicated.",
-        ),
-        ("KFoldCount", kfold["n_folds"], "Number of cross-validation folds."),
-        ("Classifier", kfold["classifier"], "Classifier implementation used for training."),
+        # NOTE: BackboneSource, EmbeddingDim, CosineDedupThreshold, KFoldCount and
+        # Classifier are deliberately NOT exposed as pipeline parameters. They are
+        # safety-critical gate *inputs* that determine the dataset size and the
+        # label-quality / drift metrics the gates compare against the immutable
+        # literal thresholds; a per-execution PipelineParameters override of any
+        # of them would let a caller with sagemaker:StartPipelineExecution weaken
+        # the gates without touching a threshold. They are baked into the step
+        # Environments as literals via ``_literal_env_value(config[...])``, and
+        # ``_forbidden_gate_parameters`` enforces that a future change cannot
+        # reintroduce them as execution parameters.
         # NOTE: CleanlabFlagThresholdFraction is deliberately NOT exposed as a pipeline
         # parameter -- it is baked as the literal RightValue of CleanlabQualityGate so
         # callers of StartPipelineExecution cannot relax the label-quality floor.
@@ -379,6 +386,8 @@ def build_dry_run_definition(
     model_artifacts_bucket = config["s3"]["model_artifacts_bucket"]
     pipeline_artifacts_bucket = config["s3"]["pipeline_artifacts_bucket"]
     raw_archive_bucket = config["s3"]["raw_archive_bucket"]
+    embedding = config["embedding"]
+    kfold = config["kfold"]
     code_s3_uri = _s3_uri(pipeline_artifacts_bucket, "code")
 
     select_data = _processing_step(
@@ -422,11 +431,15 @@ def build_dry_run_definition(
         ],
         {
             **_environment(
-                ("BRAND_ID", "BrandId"),
-                ("NAMING_PATTERN", "BrandNamingPattern"),
                 ("RECENCY_MONTHS", "RecencyMonths"),
                 ("SEED", "Seed"),
             ),
+            # Brand identity drives the raw-archive attribution token and is baked
+            # into the step Environment as literals so a per-execution
+            # ``BrandNamingPattern`` override cannot re-attribute the selection to
+            # a different brand after the build-time brand cross-check has passed.
+            "BRAND_ID": _literal_env_value(brand.id),
+            "NAMING_PATTERN": _literal_env_value(brand.naming_pattern),
             # Safety-critical dataset bounds are injected as literals so a per-execution
             # PipelineParameters override cannot change the in-container computation.
             "MIN_IMAGES_PER_CLASS": _literal_env_value(
@@ -474,14 +487,31 @@ def build_dry_run_definition(
                 },
             }
         ],
-        _environment(
-            ("BACKBONE_SOURCE", "BackboneSource"),
-            ("BACKBONE_MODEL_PATH", "BackboneModelPath"),
-            ("EMBEDDING_DIM", "EmbeddingDim"),
-            ("COSINE_DEDUP_THRESHOLD", "CosineDedupThreshold"),
-            ("USE_IMAGENET_WEIGHTS", "UseImagenetWeights"),
-            ("SEED", "Seed"),
-        ),
+        {
+            **_environment(
+                ("BACKBONE_MODEL_PATH", "BackboneModelPath"),
+                ("USE_IMAGENET_WEIGHTS", "UseImagenetWeights"),
+                ("SEED", "Seed"),
+            ),
+            # Safety-critical embedding/dedup inputs are injected as literals so a
+            # per-execution ``PipelineParameters`` override cannot weaken the dataset
+            # the CleanlabQualityGate floors are evaluated against. The companion
+            # ``CONFIGURED_*`` entries are passed to the container as an in-container
+            # upper bound so a stray environment override on the task definition is
+            # also rejected (fall-closed on tampering).
+            "BACKBONE_SOURCE": _literal_env_value(embedding["backbone_source"]),
+            "EMBEDDING_DIM": _literal_env_value(embedding["embedding_dim"]),
+            "COSINE_DEDUP_THRESHOLD": _literal_env_value(
+                embedding["cosine_dedup_threshold"]
+            ),
+            "CONFIGURED_COSINE_DEDUP_THRESHOLD": _literal_env_value(
+                embedding["cosine_dedup_threshold"]
+            ),
+            "CONFIGURED_EMBEDDING_DIM": _literal_env_value(embedding["embedding_dim"]),
+            "CONFIGURED_BACKBONE_SOURCE": _literal_env_value(
+                embedding["backbone_source"]
+            ),
+        },
     )
 
     label_quality = _processing_step(
@@ -520,10 +550,16 @@ def build_dry_run_definition(
         ],
         {
             **_environment(
-                ("KFOLD_COUNT", "KFoldCount"),
-                ("CLASSIFIER", "Classifier"),
                 ("SEED", "Seed"),
             ),
+            # Safety-critical label-quality inputs are injected as literals so a
+            # per-execution override cannot swap the detector or change the fold
+            # count that produce ``flagged_fraction`` and the DriftGate confidence.
+            # ``CONFIGURED_CLASSIFIER`` is echoed so the step can refuse an
+            # unexpected value if a stray container-level override tampers with it.
+            "KFOLD_COUNT": _literal_env_value(kfold["n_folds"]),
+            "CLASSIFIER": _literal_env_value(kfold["classifier"]),
+            "CONFIGURED_CLASSIFIER": _literal_env_value(kfold["classifier"]),
             # Safety-critical Cleanlab label-quality floor is injected as a literal so a
             # per-execution override cannot relax the in-container flagging budget.
             "CLEANLAB_FLAG_THRESHOLD_FRACTION": _literal_env_value(
@@ -641,7 +677,7 @@ def build_dry_run_definition(
                 "S3Uri": _s3_uri(model_artifacts_bucket, brand.id, "checkpoints")
             },
             "HyperParameters": {
-                "classifier": _ref("Classifier"),
+                "classifier": kfold["classifier"],
                 "epochs": _ref("Epochs"),
                 "batch_size": _ref("BatchSize"),
                 "learning_rate": _ref("LearningRate"),
@@ -649,7 +685,7 @@ def build_dry_run_definition(
                 "image_size": _ref("ImageSize"),
                 "seed": _ref("Seed"),
             },
-            "Tags": [{"Key": "brand", "Value": _ref("BrandId")}],
+            "Tags": [{"Key": "brand", "Value": brand.id}],
         },
     }
 
@@ -748,7 +784,7 @@ def build_dry_run_definition(
                 }
             },
             "CustomerMetadataProperties": {
-                "brand_id": _ref("BrandId"),
+                "brand_id": brand.id,
                 "review_topic_arn": _ref("ReviewTopicArn"),
                 "ml_lead_topic_arn": _ref("MlLeadTopicArn"),
                 "vp_engineering_topic_arn": _ref("VpEngineeringTopicArn"),
@@ -1015,11 +1051,15 @@ def validate_dry_run_definition(
 ) -> None:
     """Validate the branch graph and non-negotiable model-release safeguards.
 
-    When ``config`` is provided, the definition's BrandId and BrandNamingPattern
-    defaults must match a brand declared in ``config.yaml``. This guards against
-    exported definitions that pair one brand's id with another brand's naming
-    pattern (which would cause the SelectRecentBrandData step to curate another
-    tenant's data).
+    When ``config`` is provided, the definition's BrandId and the
+    SelectRecentBrandData step's baked ``NAMING_PATTERN`` literal must match a
+    brand declared in ``config.yaml``. This guards against exported definitions
+    that pair one brand's id with another brand's naming pattern (which would
+    cause the SelectRecentBrandData step to curate another tenant's data).
+    ``BrandNamingPattern`` is deliberately no longer required to exist as a
+    pipeline parameter -- it is baked into the step Environment as a literal
+    so a ``StartPipelineExecution`` ``PipelineParameters`` override cannot
+    defeat the brand cross-check per execution.
     """
     if definition.get("Version") != PIPELINE_VERSION:
         raise ValueError(f"Unsupported pipeline definition version: {definition.get('Version')!r}")
@@ -1051,7 +1091,6 @@ def validate_dry_run_definition(
     parameters = {item["Name"]: item for item in definition.get("Parameters", [])}
     for parameter in (
         "BrandId",
-        "BrandNamingPattern",
         "ModelPackageGroup",
         "UseSpot",
         "Seed",
@@ -1076,6 +1115,17 @@ def validate_dry_run_definition(
         "EvaluationMinPerClassCount",
         "DoneLabel",
         "NotDoneLabel",
+        # Gate *inputs* must be immutable too. These parameters would otherwise let
+        # a caller with sagemaker:StartPipelineExecution weaken the dataset the
+        # CleanlabQualityGate floors are evaluated against, swap the model that
+        # produces ``flagged_fraction`` and the DriftGate confidence, or re-point
+        # the raw-archive attribution token after the build-time brand cross-check.
+        "CosineDedupThreshold",
+        "EmbeddingDim",
+        "BackboneSource",
+        "KFoldCount",
+        "Classifier",
+        "BrandNamingPattern",
     )
     forbidden_present = sorted(name for name in _forbidden_gate_parameters if name in parameters)
     if forbidden_present:
@@ -1138,8 +1188,40 @@ def validate_dry_run_definition(
 
     if config is not None:
         brand_id = parameters["BrandId"].get("DefaultValue")
-        naming_pattern = parameters["BrandNamingPattern"].get("DefaultValue")
         model_package_group = parameters["ModelPackageGroup"].get("DefaultValue")
+        # The brand attribution token (``NAMING_PATTERN``) is baked into the
+        # SelectRecentBrandData step Environment as a literal so that
+        # ``StartPipelineExecution`` cannot re-point it per execution. Read it
+        # from the step itself (not from the Parameters block) so the
+        # build-time brand cross-check reflects the value the container will
+        # actually consume.
+        select_step = next(
+            (
+                step
+                for step in _walk_steps(definition["Steps"])
+                if step.get("Name") == "SelectRecentBrandData"
+            ),
+            None,
+        )
+        if select_step is None:
+            raise ValueError(
+                "Local DAG is missing SelectRecentBrandData step for brand cross-check."
+            )
+        select_env = select_step.get("Arguments", {}).get("Environment", {})
+        naming_pattern = select_env.get("NAMING_PATTERN")
+        env_brand_id = select_env.get("BRAND_ID")
+        if isinstance(naming_pattern, Mapping) or not isinstance(naming_pattern, str):
+            raise ValueError(
+                "SelectRecentBrandData NAMING_PATTERN must be a baked literal "
+                "string, not a parameter reference. Safety-critical gate inputs "
+                "must not be caller-overridable per execution."
+            )
+        if isinstance(env_brand_id, Mapping) or not isinstance(env_brand_id, str):
+            raise ValueError(
+                "SelectRecentBrandData BRAND_ID must be a baked literal string, "
+                "not a parameter reference. Safety-critical gate inputs must not "
+                "be caller-overridable per execution."
+            )
         try:
             declared = get_brand(config, brand_id)
         except ValueError as error:
@@ -1147,6 +1229,11 @@ def validate_dry_run_definition(
                 f"Pipeline definition declares BrandId {brand_id!r} which is not "
                 f"present in config.yaml"
             ) from error
+        if env_brand_id != declared.id:
+            raise ValueError(
+                f"SelectRecentBrandData BRAND_ID {env_brand_id!r} does not match "
+                f"declared brand {brand_id!r} (expected {declared.id!r})."
+            )
         if naming_pattern != declared.naming_pattern:
             raise ValueError(
                 f"BrandNamingPattern {naming_pattern!r} does not match brand "

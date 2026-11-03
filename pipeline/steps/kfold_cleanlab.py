@@ -94,6 +94,27 @@ def _parse_optional_int(name: str, raw: str | None, *, minimum: int) -> int | No
     return _parse_int(name, raw, minimum=minimum)
 
 
+# The CLI in ``processing/step2_kfold_predict.py`` restricts ``--classifier`` to
+# this allowlist; the pipeline step must enforce the same so an unknown value
+# cannot silently degrade to the RandomForest fallback without the DAG gate
+# noticing. ``xgboost`` is the configured detector in ``config.yaml``;
+# ``fallback`` is permitted so operators can intentionally exercise the
+# scikit-learn backup when xgboost is unavailable.
+_SUPPORTED_CLASSIFIERS = ("xgboost", "fallback")
+
+
+def _parse_classifier(name: str, raw: str) -> str:
+    """Parse the classifier env var against the supported allowlist."""
+    if raw not in _SUPPORTED_CLASSIFIERS:
+        raise ValueError(
+            f"{name} must be one of {_SUPPORTED_CLASSIFIERS!r}, got {raw!r}. "
+            "An unknown value would silently fall back to RandomForest and "
+            "produce flagged_fraction / pred_probs from a different detector "
+            "than the one the gate expects."
+        )
+    return raw
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="KFoldCleanlabQuality step")
     parser.add_argument("--embeddings", default="/opt/ml/processing/input/dataset/embeddings.npy")
@@ -105,7 +126,21 @@ def main() -> None:
     args = parser.parse_args()
 
     n_folds = _parse_int("KFOLD_COUNT", os.environ.get("KFOLD_COUNT", "5"), minimum=2)
-    classifier = os.environ.get("CLASSIFIER", "xgboost")
+    classifier = _parse_classifier(
+        "CLASSIFIER", os.environ.get("CLASSIFIER", "xgboost")
+    )
+    # Defence in depth: if the pipeline shipped a baked ``CONFIGURED_CLASSIFIER``,
+    # the active value must match it. The pipeline currently bakes ``CLASSIFIER``
+    # as a literal from config, so these are expected to be identical; this
+    # guard rejects a future regression that re-exposes CLASSIFIER as caller
+    # input or a stray container-level override.
+    configured_classifier = os.environ.get("CONFIGURED_CLASSIFIER")
+    if configured_classifier is not None and classifier != configured_classifier:
+        raise ValueError(
+            f"CLASSIFIER {classifier!r} does not match configured value "
+            f"{configured_classifier!r}; the detector that produces "
+            "flagged_fraction and pred_probs cannot be swapped per execution."
+        )
     flag_threshold = _parse_fraction(
         "CLEANLAB_FLAG_THRESHOLD_FRACTION",
         os.environ.get("CLEANLAB_FLAG_THRESHOLD_FRACTION", "0.05"),
@@ -166,6 +201,11 @@ def main() -> None:
             "per_class_cleaned_counts": per_class_cleaned_counts,
             "minimum_class_count": minimum_class_count,
             "class_count": len(per_class_cleaned_counts),
+            # Echo the effective detector + fold count so a reviewer can see
+            # which model actually produced ``flagged_fraction`` and the
+            # ``pred_probs`` that feed DriftGate's confidence metric.
+            "classifier": classifier,
+            "n_folds": n_folds,
         }
     )
 

@@ -40,7 +40,16 @@ def test_local_dry_run_is_complete_for_every_declared_brand() -> None:
         )
 
         assert parameters["BrandId"] == brand["id"]
-        assert parameters["BrandNamingPattern"] == brand["naming_pattern"]
+        assert "BrandNamingPattern" not in parameters
+        select_step = next(
+            step
+            for step in _flatten_steps(definition["Steps"])
+            if step["Name"] == "SelectRecentBrandData"
+        )
+        assert (
+            select_step["Arguments"]["Environment"]["NAMING_PATTERN"]
+            == brand["naming_pattern"]
+        )
         assert parameters["ModelPackageGroup"] == brand["model_package_group"]
         assert register_step["Arguments"]["ModelApprovalStatus"] == "PendingManualApproval"
 
@@ -51,15 +60,15 @@ def test_dry_run_parameters_match_all_configured_gates() -> None:
     parameters = {item["Name"]: item["DefaultValue"] for item in definition["Parameters"]}
 
     assert parameters["RecencyMonths"] == config["data_selection"]["recency_months"]
-    assert parameters["CosineDedupThreshold"] == config["embedding"]["cosine_dedup_threshold"]
-    assert parameters["KFoldCount"] == config["kfold"]["n_folds"]
     assert parameters["UseSpot"] is config["training"]["use_spot"]
     assert parameters["ReviewTopicArn"] == config["notifications"]["review_topic_arn"]
     assert parameters["MockAws"] is config["local_mode"]["mock_aws"]
 
-    # Safety-critical gate thresholds must not be exposed as execution parameters,
-    # because SageMaker PipelineParameters are overridable per execution. They are
-    # instead baked as literal RightValues into the Condition steps.
+    # Safety-critical gate thresholds AND the gate *inputs* that produce the
+    # LeftValue metrics must not be exposed as execution parameters, because
+    # SageMaker PipelineParameters are overridable per execution. They are
+    # instead baked as literal RightValues into the Condition steps or as
+    # literal step Environment values that the containers consume directly.
     forbidden = {
         "AccuracyThreshold",
         "FpRateEmergencyThreshold",
@@ -70,11 +79,66 @@ def test_dry_run_parameters_match_all_configured_gates() -> None:
         "TargetDatasetMin",
         "TargetDatasetMax",
         "MinImagesPerClass",
+        "CosineDedupThreshold",
+        "EmbeddingDim",
+        "BackboneSource",
+        "KFoldCount",
+        "Classifier",
+        "BrandNamingPattern",
     }
     assert forbidden.isdisjoint(parameters), (
-        "Safety-critical thresholds leaked back into pipeline parameters: "
+        "Safety-critical thresholds or gate inputs leaked back into pipeline parameters: "
         f"{sorted(forbidden & parameters.keys())}"
     )
+
+
+def test_gate_input_envs_are_literals_not_parameter_references() -> None:
+    """The step Environment values that produce safety-gate LeftValue metrics
+    must be baked literals, not ``{"Get": "Parameters.*"}`` references. A
+    reference would let ``StartPipelineExecution`` weaken a gate by passing
+    ``PipelineParameters`` without touching any threshold.
+    """
+    config = load_config(DEFAULT_CONFIG_PATH)
+    definition = build_dry_run_definition(DEFAULT_CONFIG_PATH)
+    envs = {
+        step["Name"]: step["Arguments"].get("Environment", {})
+        for step in _flatten_steps(definition["Steps"])
+        if "Environment" in step.get("Arguments", {})
+    }
+
+    select_env = envs["SelectRecentBrandData"]
+    assert select_env["BRAND_ID"] == "white-castle"
+    assert select_env["NAMING_PATTERN"] == "wc_*"
+
+    embed_env = envs["EmbedAndDeduplicate"]
+    assert embed_env["COSINE_DEDUP_THRESHOLD"] == str(
+        config["embedding"]["cosine_dedup_threshold"]
+    )
+    assert embed_env["EMBEDDING_DIM"] == str(config["embedding"]["embedding_dim"])
+    assert embed_env["BACKBONE_SOURCE"] == config["embedding"]["backbone_source"]
+    assert embed_env["CONFIGURED_COSINE_DEDUP_THRESHOLD"] == str(
+        config["embedding"]["cosine_dedup_threshold"]
+    )
+
+    quality_env = envs["KFoldCleanlabQuality"]
+    assert quality_env["CLASSIFIER"] == config["kfold"]["classifier"]
+    assert quality_env["KFOLD_COUNT"] == str(config["kfold"]["n_folds"])
+    assert quality_env["CONFIGURED_CLASSIFIER"] == config["kfold"]["classifier"]
+
+    for name, env in envs.items():
+        for key, value in env.items():
+            if key.startswith("CONFIGURED_") or key in {
+                "BRAND_ID",
+                "NAMING_PATTERN",
+                "COSINE_DEDUP_THRESHOLD",
+                "EMBEDDING_DIM",
+                "BACKBONE_SOURCE",
+                "CLASSIFIER",
+                "KFOLD_COUNT",
+            }:
+                assert not isinstance(value, dict), (
+                    f"{name!r} Environment[{key!r}] must be a literal, not a reference: {value!r}"
+                )
 
 
 def test_safety_gate_right_values_are_literal_and_match_config() -> None:
@@ -156,8 +220,10 @@ def test_each_checked_in_brand_definition_matches_its_fresh_dry_run() -> None:
 
 
 def test_each_checked_in_brand_definition_passes_consistency_validation() -> None:
-    """The BrandId/BrandNamingPattern/ModelPackageGroup triple in each committed
-    definition must be internally consistent with config.yaml.
+    """The BrandId/NAMING_PATTERN/ModelPackageGroup triple in each committed
+    definition must be internally consistent with config.yaml. ``NAMING_PATTERN``
+    is baked into the SelectRecentBrandData step Environment as a literal rather
+    than exposed as the overridable ``BrandNamingPattern`` parameter it used to be.
     """
     config = load_config(DEFAULT_CONFIG_PATH)
     for brand in config["brands"]:
@@ -166,25 +232,37 @@ def test_each_checked_in_brand_definition_passes_consistency_validation() -> Non
         validate_dry_run_definition(definition, config=config)
         parameters = {item["Name"]: item["DefaultValue"] for item in definition["Parameters"]}
         assert parameters["BrandId"] == brand["id"]
-        assert parameters["BrandNamingPattern"] == brand["naming_pattern"]
         assert parameters["ModelPackageGroup"] == brand["model_package_group"]
+        assert "BrandNamingPattern" not in parameters
+        select_step = next(
+            step
+            for step in _flatten_steps(definition["Steps"])
+            if step["Name"] == "SelectRecentBrandData"
+        )
+        env = select_step["Arguments"]["Environment"]
+        assert env["NAMING_PATTERN"] == brand["naming_pattern"]
+        assert env["BRAND_ID"] == brand["id"]
 
 
 def test_validate_dry_run_rejects_brand_pattern_mismatch() -> None:
     """Pairing one brand's id with another brand's naming pattern must fail.
 
     This is the exact failure mode of the previous Terraform template clone:
-    the brand id was substituted but the naming pattern token was not.
+    the brand id was substituted but the naming pattern token was not. The
+    pattern is now baked into the SelectRecentBrandData step Environment as
+    a literal, so the attack surface it tests is identical to a stray edit
+    of the committed per-brand definition.
     """
     import pytest
 
     config = load_config(DEFAULT_CONFIG_PATH)
     definition = build_dry_run_definition(DEFAULT_CONFIG_PATH, "brand-b")
-    # Simulate the "template clone" bug: overwrite BrandNamingPattern with the
-    # white-castle default while leaving BrandId=brand-b.
-    for item in definition["Parameters"]:
-        if item["Name"] == "BrandNamingPattern":
-            item["DefaultValue"] = "wc_*"
+    # Simulate the "template clone" bug: overwrite SelectRecentBrandData's
+    # baked NAMING_PATTERN literal with the white-castle default while
+    # leaving BrandId=brand-b.
+    for step in _flatten_steps(definition["Steps"]):
+        if step["Name"] == "SelectRecentBrandData":
+            step["Arguments"]["Environment"]["NAMING_PATTERN"] = "wc_*"
             break
     with pytest.raises(ValueError, match="BrandNamingPattern"):
         validate_dry_run_definition(definition, config=config)

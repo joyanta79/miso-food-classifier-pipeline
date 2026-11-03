@@ -42,9 +42,13 @@ python pipeline/export_definition.py --brand brand-b --output /tmp/brand-b-pipel
 ```
 
 `validate_dry_run_definition` additionally asserts that each committed
-definition's `BrandId`, `BrandNamingPattern`, and `ModelPackageGroup` triple is
-consistent with `config.yaml`, so a stale clone that still references
-`white-castle`'s `wc_*` naming pattern will fail validation and CI.
+definition's `BrandId`, `SelectRecentBrandData`'s baked `NAMING_PATTERN` literal,
+and `ModelPackageGroup` triple is consistent with `config.yaml`, so a stale
+clone that still references `white-castle`'s `wc_*` naming pattern will fail
+validation and CI. The naming pattern is baked into the step `Environment`
+as a literal (rather than exposed as the overridable `BrandNamingPattern`
+parameter it used to be) so a per-execution `PipelineParameters` override
+cannot re-attribute the raw-archive selection to a different brand's token.
 
 ## Pipeline flow
 
