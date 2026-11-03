@@ -42,6 +42,7 @@ from pathlib import Path
 # Default locations when the pkgcode / code channel is mounted inside a job.
 _DEFAULT_LOCK_SEARCH = (
     "/opt/ml/processing/input/pkgcode/requirements.lock",
+    "/opt/ml/processing/input/code/requirements.lock",
     "/opt/ml/input/data/code/requirements.lock",
     "/opt/ml/code/requirements.lock",
 )

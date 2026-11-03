@@ -194,6 +194,7 @@
             "Get": "Parameters.BrandId"
           },
           "MIN_IMAGES_PER_CLASS": "500",
+          "MISO_CODE_MANIFEST_DIGEST": "0000000000000000000000000000000000000000000000000000000000000000",
           "NAMING_PATTERN": {
             "Get": "Parameters.BrandNamingPattern"
           },
@@ -222,7 +223,7 @@
               "LocalPath": "/opt/ml/processing/input/code",
               "S3DataType": "S3Prefix",
               "S3InputMode": "File",
-              "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/code"
+              "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/brand-e/code@sha256=0000000000000000000000000000000000000000000000000000000000000000"
             }
           }
         ],
@@ -339,6 +340,7 @@
                 "EMBEDDING_DIM": {
                   "Get": "Parameters.EmbeddingDim"
                 },
+                "MISO_CODE_MANIFEST_DIGEST": "0000000000000000000000000000000000000000000000000000000000000000",
                 "SEED": {
                   "Get": "Parameters.Seed"
                 },
@@ -362,7 +364,7 @@
                     "LocalPath": "/opt/ml/processing/input/code",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
-                    "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/code"
+                    "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/brand-e/code@sha256=0000000000000000000000000000000000000000000000000000000000000000"
                   }
                 }
               ],
@@ -410,6 +412,7 @@
                   "Get": "Parameters.KFoldCount"
                 },
                 "MIN_IMAGES_PER_CLASS": "500",
+                "MISO_CODE_MANIFEST_DIGEST": "0000000000000000000000000000000000000000000000000000000000000000",
                 "SEED": {
                   "Get": "Parameters.Seed"
                 },
@@ -431,7 +434,7 @@
                     "LocalPath": "/opt/ml/processing/input/code",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
-                    "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/code"
+                    "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/brand-e/code@sha256=0000000000000000000000000000000000000000000000000000000000000000"
                   }
                 }
               ],
@@ -555,7 +558,8 @@
                       "LEVEL1_CONFIDENCE_FLOOR": "0.65",
                       "LEVEL2_CONFIDENCE_THRESHOLD": {
                         "Get": "Parameters.Level2ConfidenceThreshold"
-                      }
+                      },
+                      "MISO_CODE_MANIFEST_DIGEST": "0000000000000000000000000000000000000000000000000000000000000000"
                     },
                     "ProcessingInputs": [
                       {
@@ -573,7 +577,7 @@
                           "LocalPath": "/opt/ml/processing/input/code",
                           "S3DataType": "S3Prefix",
                           "S3InputMode": "File",
-                          "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/code"
+                          "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/brand-e/code@sha256=0000000000000000000000000000000000000000000000000000000000000000"
                         }
                       }
                     ],
@@ -664,6 +668,9 @@
                           "EnableManagedSpotTraining": {
                             "Get": "Parameters.UseSpot"
                           },
+                          "Environment": {
+                            "MISO_CODE_MANIFEST_DIGEST": "0000000000000000000000000000000000000000000000000000000000000000"
+                          },
                           "HyperParameters": {
                             "batch_size": {
                               "Get": "Parameters.BatchSize"
@@ -704,7 +711,7 @@
                                 "S3DataSource": {
                                   "S3DataDistributionType": "FullyReplicated",
                                   "S3DataType": "S3Prefix",
-                                  "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/code"
+                                  "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/brand-e/code@sha256=0000000000000000000000000000000000000000000000000000000000000000"
                                 }
                               }
                             }
@@ -752,6 +759,7 @@
                             "LATENCY_BUDGET_MS": "1000",
                             "MIN_PER_CLASS_COUNT": "50",
                             "MIN_SAMPLE_COUNT": "100",
+                            "MISO_CODE_MANIFEST_DIGEST": "0000000000000000000000000000000000000000000000000000000000000000",
                             "NOT_DONE_LABEL": "not_done"
                           },
                           "ProcessingInputs": [
@@ -770,7 +778,7 @@
                                 "LocalPath": "/opt/ml/processing/input/code",
                                 "S3DataType": "S3Prefix",
                                 "S3InputMode": "File",
-                                "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/code"
+                                "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/brand-e/code@sha256=0000000000000000000000000000000000000000000000000000000000000000"
                               }
                             }
                           ],

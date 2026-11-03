@@ -42,6 +42,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Integrity-check the mounted code bundle before importing from it (CWE-494).
+_CODE_MOUNT = "/opt/ml/processing/input/code"
+if os.path.isdir(_CODE_MOUNT):
+    import importlib.util as _ilu
+
+    _spec = _ilu.spec_from_file_location(
+        "_miso_manifest", f"{_CODE_MOUNT}/_manifest.py"
+    )
+    if _spec is None or _spec.loader is None:
+        print(
+            f"ERROR: {_CODE_MOUNT}/_manifest.py is missing; refusing to execute mounted code",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    _manifest = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_manifest)
+    try:
+        _manifest.verify_mounted_code(_CODE_MOUNT)
+    except Exception as _integrity_error:
+        print(
+            f"ERROR: code bundle integrity check failed: {_integrity_error}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
 UTC = timezone.utc
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 _WILDCARD_CHARS = frozenset("*?[")

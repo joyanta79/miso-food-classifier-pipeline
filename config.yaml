@@ -7,6 +7,13 @@ s3:
   model_artifacts_bucket: "<replace-model-artifacts-bucket>"
   pipeline_artifacts_bucket: "<replace-pipeline-artifacts-bucket>"
   raw_archive_bucket: "<replace-raw-archive-bucket>"
+  # Content digest (lowercase SHA-256 hex, 64 chars) of the step-code bundle
+  # published to ``<pipeline_artifacts_bucket>/<brand>/code@sha256=<digest>/``
+  # by the CI/deploy identity. The pipeline refuses to build if this is not a
+  # 64-char hex digest, so a mutable ``code/`` prefix cannot be used (CWE-494).
+  # Each brand ends up with its own digest-addressed code prefix so a
+  # compromise of one brand's bundle cannot cross tenants.
+  code_manifest_digest: "0000000000000000000000000000000000000000000000000000000000000000"
 brands:
   - id: white-castle
     naming_pattern: "wc_*"

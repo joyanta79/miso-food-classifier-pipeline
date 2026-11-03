@@ -12,6 +12,7 @@ The module has two modes:
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,15 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 PIPELINE_VERSION = "2020-12-01"
+
+# Lowercase SHA-256 hex (64 chars). Enforced on the code-channel URI so the
+# step bundle is content-addressed and immutable relative to the jobs that run
+# it (CWE-494). The all-zeros digest is the template sentinel: it parses as a
+# valid 64-char hex so dry-run rendering stays deterministic, but the in-
+# container manifest verifier refuses it, which forces operators to publish a
+# real digest-pinned bundle before any job executes code from the channel.
+_CODE_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_CODE_DIGEST_SENTINEL = "0" * 64
 
 
 @dataclass(frozen=True)
@@ -294,6 +304,49 @@ def _s3_uri(bucket: str, *parts: str) -> str:
     return f"s3://{bucket}{suffix}"
 
 
+def _code_manifest_digest(config: Mapping[str, Any]) -> str:
+    """Return the SHA-256 digest pinning the step-code bundle.
+
+    The digest must be a 64-character lowercase hex string. We reject anything
+    else at definition-build time so a mutable, non-content-addressed code
+    prefix (the CWE-494 root cause) cannot be baked into a committed pipeline
+    definition. The all-zero sentinel is accepted here (template rendering is
+    deterministic) but the in-container manifest verifier refuses it, so a job
+    will never execute code mounted from the sentinel prefix.
+    """
+    s3_cfg = config.get("s3")
+    if not isinstance(s3_cfg, Mapping):
+        raise ValueError("config.yaml must define an 's3' section")
+    digest = s3_cfg.get("code_manifest_digest")
+    if not isinstance(digest, str) or not _CODE_DIGEST_RE.match(digest):
+        raise ValueError(
+            "s3.code_manifest_digest must be a 64-character lowercase SHA-256 "
+            "hex digest pinning the published step-code bundle (CWE-494). "
+            "Publish the bundle to a digest-addressed prefix and record its "
+            "digest here before building the pipeline definition."
+        )
+    return digest
+
+
+def _code_s3_uri(config: Mapping[str, Any], brand: Brand) -> str:
+    """Return the per-brand, digest-addressed code-channel S3 URI.
+
+    The URI has the form ``s3://<pipeline-artifacts>/<brand>/code@sha256=<hex>/``:
+
+    * The ``<brand>/`` segment gives every brand its own code prefix so a
+      compromise of one brand's bundle cannot cross tenants.
+    * The ``code@sha256=<hex>`` segment content-addresses the bundle. The CI/
+      deploy identity publishes a new bundle under a new digest; the SageMaker
+      execution role is explicitly denied ``s3:PutObject``/``s3:DeleteObject``
+      on ``*/code@sha256=*`` prefixes (see ``infra/iam.tf``) so a job cannot
+      rewrite the code it later executes.
+    * ``validate_dry_run_definition`` enforces this exact shape on every
+      ``pipeline-code`` input and on the training ``code`` channel.
+    """
+    digest = _code_manifest_digest(config)
+    bucket = config["s3"]["pipeline_artifacts_bucket"]
+    return _s3_uri(bucket, brand.id, f"code@sha256={digest}")
+
 def _environment(*pairs: tuple[str, str]) -> dict[str, Any]:
     return {key: _ref(parameter) for key, parameter in pairs}
 
@@ -319,6 +372,19 @@ def _processing_step(
     environment: dict[str, Any],
     property_files: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
+    # Bake the code-bundle digest into the step Environment so the in-container
+    # manifest verifier (pipeline/steps/_manifest.py) can refuse to execute a
+    # bundle that does not match the pinned digest (CWE-494).
+    digest_match = re.search(r"code@sha256=([0-9a-f]{64})", code_s3_uri)
+    if digest_match is None:
+        raise ValueError(
+            f"code_s3_uri {code_s3_uri!r} is not digest-addressed; expected "
+            "'.../code@sha256=<64hex>' so the executed code is content-pinned."
+        )
+    integrity_env = {"MISO_CODE_MANIFEST_DIGEST": digest_match.group(1)}
+    # Integrity env takes precedence: a step's existing Environment dict must
+    # not be able to shadow or disable the manifest-digest check.
+    environment = {**environment, **integrity_env}
     step: dict[str, Any] = {
         "Name": name,
         "Type": "Processing",
@@ -379,7 +445,7 @@ def build_dry_run_definition(
     model_artifacts_bucket = config["s3"]["model_artifacts_bucket"]
     pipeline_artifacts_bucket = config["s3"]["pipeline_artifacts_bucket"]
     raw_archive_bucket = config["s3"]["raw_archive_bucket"]
-    code_s3_uri = _s3_uri(pipeline_artifacts_bucket, "code")
+    code_s3_uri = _code_s3_uri(config, brand)
 
     select_data = _processing_step(
         "SelectRecentBrandData",
@@ -648,6 +714,12 @@ def build_dry_run_definition(
                 "checkpoint_every_epochs": _ref("CheckpointEveryEpochs"),
                 "image_size": _ref("ImageSize"),
                 "seed": _ref("Seed"),
+            },
+            # Training container reads MISO_CODE_MANIFEST_DIGEST from its
+            # Environment to integrity-check the mounted ``code`` channel
+            # before importing anything from it (CWE-494).
+            "Environment": {
+                "MISO_CODE_MANIFEST_DIGEST": _code_manifest_digest(config),
             },
             "Tags": [{"Key": "brand", "Value": _ref("BrandId")}],
         },
@@ -1099,7 +1171,35 @@ def validate_dry_run_definition(
 
     # Every RoleArn and every code-channel S3Uri must be a literal string --
     # no ``Get: Parameters.*`` indirection -- so a PipelineParameters override
-    # cannot swap in an attacker role or an attacker code bucket.
+    # cannot swap in an attacker role or an attacker code bucket. In addition,
+    # the ``pipeline-code`` input and the training ``code`` channel URIs MUST
+    # be content-addressed: ``s3://<bucket>/<brand>/code@sha256=<64hex>[/...]``.
+    # A non-digest-pinned prefix is a mutable code store the executing identity
+    # could rewrite (CWE-494); a non-brand-scoped prefix would let one brand's
+    # bundle compromise another. Both checks run even without ``config`` so a
+    # definition parsed in isolation is still rejected when it is mutable.
+    code_uri_re = re.compile(
+        r"^s3://[^/]+/([^/]+)/code@sha256=([0-9a-f]{64})(?:/.*)?$"
+    )
+    code_prefixes: set[str] = set()
+
+    def _check_code_uri(uri: Any, kind: str, path: str) -> None:
+        if not isinstance(uri, str) or not uri.startswith("s3://"):
+            raise ValueError(
+                f"{kind} S3Uri at {path} must be a literal s3:// URI; "
+                "parameterised code channels enable code-channel hijack"
+            )
+        match = code_uri_re.match(uri)
+        if match is None:
+            raise ValueError(
+                f"{kind} S3Uri at {path} must be a per-brand, digest-addressed "
+                "prefix of the form "
+                "'s3://<bucket>/<brand>/code@sha256=<64hex>' so the executed "
+                "code is immutable relative to the job that runs it (CWE-494). "
+                f"Got: {uri!r}"
+            )
+        code_prefixes.add(uri)
+
     def _walk(node: Any, path: str = "$") -> None:
         if isinstance(node, Mapping):
             role = node.get("RoleArn") if "RoleArn" in node else None
@@ -1111,23 +1211,16 @@ def validate_dry_run_definition(
                 node.get("InputName") == "pipeline-code"
                 and isinstance(node.get("S3Input"), Mapping)
             ):
-                uri = node["S3Input"].get("S3Uri")
-                if not isinstance(uri, str) or not uri.startswith("s3://"):
-                    raise ValueError(
-                        f"pipeline-code S3Uri at {path} must be a literal s3:// URI; "
-                        "parameterised code channels enable code-channel hijack"
-                    )
+                _check_code_uri(
+                    node["S3Input"].get("S3Uri"), "pipeline-code", path
+                )
             if node.get("ChannelName") == "code":
                 uri = (
                     node.get("DataSource", {})
                     .get("S3DataSource", {})
                     .get("S3Uri")
                 )
-                if not isinstance(uri, str) or not uri.startswith("s3://"):
-                    raise ValueError(
-                        f"training 'code' channel S3Uri at {path} must be a literal "
-                        "s3:// URI; parameterised code channels enable code-channel hijack"
-                    )
+                _check_code_uri(uri, "training 'code' channel", path)
             for key, value in node.items():
                 _walk(value, f"{path}.{key}")
         elif isinstance(node, list):
@@ -1135,6 +1228,15 @@ def validate_dry_run_definition(
                 _walk(value, f"{path}[{index}]")
 
     _walk(definition)
+
+    # Within one definition every step must mount the SAME code bundle --
+    # mixing digests across steps would mean part of the DAG executes a
+    # different revision from the rest, defeating the integrity gate.
+    if len(code_prefixes) > 1:
+        raise ValueError(
+            "All code-channel S3 URIs must reference a single digest-addressed "
+            f"bundle; found conflicting prefixes: {sorted(code_prefixes)}"
+        )
 
     if config is not None:
         brand_id = parameters["BrandId"].get("DefaultValue")
@@ -1159,6 +1261,20 @@ def validate_dry_run_definition(
                 f"ModelPackageGroup {model_package_group!r} does not match brand "
                 f"{brand_id!r} (expected {declared.model_package_group!r})."
             )
+        # When config is available, the code-channel prefix must match the
+        # per-brand digest-addressed URI the exporter would emit. This guards
+        # against committed definitions whose code prefix was hand-edited to a
+        # mutable or cross-tenant bucket location.
+        expected_code_prefix = _code_s3_uri(config, declared)
+        for actual in code_prefixes:
+            if actual != expected_code_prefix:
+                raise ValueError(
+                    f"Code-channel S3Uri {actual!r} does not match the "
+                    f"per-brand digest-addressed prefix expected for brand "
+                    f"{brand_id!r} ({expected_code_prefix!r}). Republish the "
+                    "step-code bundle to its own digest-addressed prefix and "
+                    "regenerate the definition."
+                )
 
     register_step = next(
         step
@@ -1321,7 +1437,7 @@ def build_sagemaker_pipeline(
     evaluation = config["evaluation"]
     session = PipelineSession()
     role = config["aws"]["sagemaker_role_arn"]
-    code_root = f"s3://{config['s3']['pipeline_artifacts_bucket']}/code"
+    code_root = _code_s3_uri(config, brand)
     output_root = f"s3://{config['s3']['pipeline_artifacts_bucket']}/{brand.id}"
 
     processor = ScriptProcessor(
