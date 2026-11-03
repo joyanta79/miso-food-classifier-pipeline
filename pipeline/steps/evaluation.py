@@ -35,6 +35,77 @@ _bootstrap.ensure({"PIL": "pillow", "numpy": "numpy"})
 
 import numpy as np
 
+# Safety caps for untrusted tarball extraction. The model.tar.gz is mounted from
+# an S3 prefix that any principal with s3:PutObject on the model-artifacts
+# bucket (or a pipeline-parameter override) can write to, so it must be treated
+# as untrusted input. These caps bound a potential decompression bomb; the
+# per-member validation below bounds path-traversal / link attacks.
+_MAX_MEMBERS = 10_000
+_MAX_TOTAL_UNCOMPRESSED_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB
+_MAX_MEMBER_BYTES = 5 * 1024 * 1024 * 1024  # 5 GiB per member
+
+
+def _safe_extract_tar(handle: tarfile.TarFile, dest: Path) -> None:
+    """Extract ``handle`` into ``dest`` with the equivalent of ``filter='data'``.
+
+    The step runs on CPython < 3.12 where ``tarfile.extractall`` defaults to
+    the fully-trusted legacy filter, so we validate every member explicitly:
+
+    * reject absolute member names and names containing ``..`` components;
+    * reject non-regular-file members (symlinks, hardlinks, devices, FIFOs)
+      because they can redirect writes outside ``dest`` or escape later;
+    * require the resolved destination of each member to stay inside the
+      resolved ``dest`` directory;
+    * enforce a member-count cap and a cumulative uncompressed-size cap to
+      stop decompression bombs.
+    """
+    dest_root = Path(os.path.realpath(dest))
+    total_bytes = 0
+    member_count = 0
+    safe_members: list[tarfile.TarInfo] = []
+    for member in handle:
+        member_count += 1
+        if member_count > _MAX_MEMBERS:
+            raise ValueError(
+                f"tarball contains more than {_MAX_MEMBERS} members; refusing to extract"
+            )
+        name = member.name
+        # Reject absolute paths and parent-directory traversal.
+        if name.startswith("/") or os.path.isabs(name):
+            raise ValueError(f"tarball member has absolute path: {name!r}")
+        if os.path.normpath(name).startswith("..") or any(
+            part == ".." for part in name.replace("\\", "/").split("/")
+        ):
+            raise ValueError(f"tarball member escapes extraction root: {name!r}")
+        # Reject anything that isn't a plain file or directory. Symlinks and
+        # hardlinks could redirect subsequent writes outside dest_root; device
+        # and FIFO members have no legitimate use in a model artifact.
+        if not (member.isreg() or member.isdir()):
+            raise ValueError(
+                f"tarball member {name!r} is not a regular file or directory "
+                f"(type={member.type!r})"
+            )
+        # Containment check against the real resolved paths.
+        target = os.path.realpath(os.path.join(dest_root, name))
+        if target != str(dest_root) and not target.startswith(str(dest_root) + os.sep):
+            raise ValueError(f"tarball member {name!r} resolves outside extraction root")
+        if member.isreg():
+            if member.size < 0 or member.size > _MAX_MEMBER_BYTES:
+                raise ValueError(
+                    f"tarball member {name!r} declared size {member.size} exceeds cap"
+                )
+            total_bytes += member.size
+            if total_bytes > _MAX_TOTAL_UNCOMPRESSED_BYTES:
+                raise ValueError(
+                    "tarball cumulative uncompressed size exceeds "
+                    f"{_MAX_TOTAL_UNCOMPRESSED_BYTES} bytes; refusing to extract"
+                )
+        safe_members.append(member)
+    # Drop any setuid/setgid/world-writable bits before writing to disk.
+    for member in safe_members:
+        member.mode = member.mode & 0o755
+    handle.extractall(dest_root, members=safe_members)
+
 
 def _load_model(model_dir: Path):
     import tensorflow as tf
@@ -67,11 +138,13 @@ def main() -> None:
     image_size = int(os.environ.get("IMAGE_SIZE", "224"))
     model_dir = Path(args.model)
 
-    # Unpack model.tar.gz if present.
+    # Unpack model.tar.gz if present. The archive comes from an S3 prefix that
+    # is not trusted end-to-end (see the model-artifacts bucket wiring in
+    # pipeline/pipeline.py), so validate every member before writing.
     tarball = model_dir / "model.tar.gz"
     if tarball.exists():
         with tarfile.open(tarball) as handle:
-            handle.extractall(model_dir)
+            _safe_extract_tar(handle, model_dir)
 
     model = _load_model(model_dir)
 
