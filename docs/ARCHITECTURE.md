@@ -22,8 +22,10 @@ contracts explicit without duplicating them.
 
 `config.yaml` is the source of truth for the configured brands. Terraform creates
 one SageMaker pipeline and one Model Package Group per brand. Each pipeline is
-compiled from the same baseline definition but replaces the baseline brand and
-registry group with the declared values for that brand.
+compiled from its **own per-brand definition file** (`infra/pipeline_definition.<brand>.json`),
+rendered from `config.yaml` by `pipeline/export_definition.py`. Terraform selects
+the matching file by brand id, so brand-specific tokens such as
+`BrandNamingPattern` are never cloned from a single-brand baseline.
 
 This ensures that:
 
@@ -32,12 +34,17 @@ This ensures that:
 - model packages never share a registry group across brands; and
 - a caller cannot select an undeclared brand through the exporter.
 
-The checked-in definition is the `white-castle` baseline. The local exporter can
-render the dry-run DAG for any configured brand:
+Regenerate every per-brand definition after a config change:
 
 ```bash
+python pipeline/export_definition.py           # writes infra/pipeline_definition.<brand>.json per brand
 python pipeline/export_definition.py --brand brand-b --output /tmp/brand-b-pipeline.json
 ```
+
+`validate_dry_run_definition` additionally asserts that each committed
+definition's `BrandId`, `BrandNamingPattern`, and `ModelPackageGroup` triple is
+consistent with `config.yaml`, so a stale clone that still references
+`white-castle`'s `wc_*` naming pattern will fail validation and CI.
 
 ## Pipeline flow
 

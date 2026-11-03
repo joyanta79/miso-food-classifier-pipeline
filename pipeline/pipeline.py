@@ -942,6 +942,10 @@ def build_dry_run_definition(
     return _regionalize_dlc_uris(
         {
             "Version": PIPELINE_VERSION,
+            "Metadata": {
+                "BrandId": brand.id,
+                "GeneratedBy": "pipeline/export_definition.py",
+            },
             "Parameters": build_parameters(config, brand),
             "Steps": [select_data, dataset_gate],
         },
@@ -1005,8 +1009,18 @@ def _walk_steps(steps: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     return flattened
 
 
-def validate_dry_run_definition(definition: Mapping[str, Any]) -> None:
-    """Validate the branch graph and non-negotiable model-release safeguards."""
+def validate_dry_run_definition(
+    definition: Mapping[str, Any],
+    config: Mapping[str, Any] | None = None,
+) -> None:
+    """Validate the branch graph and non-negotiable model-release safeguards.
+
+    When ``config`` is provided, the definition's BrandId and BrandNamingPattern
+    defaults must match a brand declared in ``config.yaml``. This guards against
+    exported definitions that pair one brand's id with another brand's naming
+    pattern (which would cause the SelectRecentBrandData step to curate another
+    tenant's data).
+    """
     if definition.get("Version") != PIPELINE_VERSION:
         raise ValueError(f"Unsupported pipeline definition version: {definition.get('Version')!r}")
 
@@ -1035,7 +1049,13 @@ def validate_dry_run_definition(definition: Mapping[str, Any]) -> None:
         raise ValueError("Local DAG contains duplicate step names")
 
     parameters = {item["Name"]: item for item in definition.get("Parameters", [])}
-    for parameter in ("BrandId", "ModelPackageGroup", "UseSpot", "Seed"):
+    for parameter in (
+        "BrandId",
+        "BrandNamingPattern",
+        "ModelPackageGroup",
+        "UseSpot",
+        "Seed",
+    ):
         if parameter not in parameters:
             raise ValueError(f"Local DAG is missing required parameter: {parameter}")
     # Safety-critical gate thresholds must NEVER appear as execution parameters, since
@@ -1115,6 +1135,30 @@ def validate_dry_run_definition(definition: Mapping[str, Any]) -> None:
                 _walk(value, f"{path}[{index}]")
 
     _walk(definition)
+
+    if config is not None:
+        brand_id = parameters["BrandId"].get("DefaultValue")
+        naming_pattern = parameters["BrandNamingPattern"].get("DefaultValue")
+        model_package_group = parameters["ModelPackageGroup"].get("DefaultValue")
+        try:
+            declared = get_brand(config, brand_id)
+        except ValueError as error:
+            raise ValueError(
+                f"Pipeline definition declares BrandId {brand_id!r} which is not "
+                f"present in config.yaml"
+            ) from error
+        if naming_pattern != declared.naming_pattern:
+            raise ValueError(
+                f"BrandNamingPattern {naming_pattern!r} does not match brand "
+                f"{brand_id!r} (expected {declared.naming_pattern!r}). This usually "
+                f"means a single-brand baseline was cloned without substituting "
+                f"brand-specific tokens."
+            )
+        if model_package_group != declared.model_package_group:
+            raise ValueError(
+                f"ModelPackageGroup {model_package_group!r} does not match brand "
+                f"{brand_id!r} (expected {declared.model_package_group!r})."
+            )
 
     register_step = next(
         step
@@ -1231,8 +1275,9 @@ def render_dry_run_json(
     brand_id: str = "white-castle",
 ) -> str:
     """Return a canonical JSON representation of the complete local DAG."""
+    config = load_config(config_path)
     definition = build_dry_run_definition(config_path, brand_id)
-    validate_dry_run_definition(definition)
+    validate_dry_run_definition(definition, config=config)
     return json.dumps(definition, indent=2, sort_keys=True) + "\n"
 
 

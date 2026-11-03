@@ -83,6 +83,8 @@ def _expected_brand_token(naming_pattern: str) -> str:
     return literal[:underscore]
 
 
+
+
 def select(
     image_root: Path,
     naming_pattern: str,
