@@ -38,6 +38,11 @@ _EVENTBRIDGE_MAX_BATCH = 10
 # is the throttle unit enforced against SageMaker.
 _DEFAULT_IDEMPOTENCY_WINDOW_SECONDS = 300
 
+# Minimum idempotency window. A caller-supplied
+# ``MISO_IDEMPOTENCY_WINDOW_SECONDS`` smaller than this is clamped up so a
+# misconfiguration (e.g. ``1``) cannot neutralize the throttle.
+_MIN_IDEMPOTENCY_WINDOW_SECONDS = 60
+
 # SageMaker pipeline execution states that count as in-flight and should
 # therefore suppress a new start for the same brand.
 _IN_FLIGHT_PIPELINE_STATES = frozenset({"Executing", "Stopping"})
@@ -195,7 +200,17 @@ def _idempotency_window_seconds() -> int:
         value = int(raw)
     except ValueError:
         return _DEFAULT_IDEMPOTENCY_WINDOW_SECONDS
-    return value if value > 0 else _DEFAULT_IDEMPOTENCY_WINDOW_SECONDS
+    if value <= 0:
+        return _DEFAULT_IDEMPOTENCY_WINDOW_SECONDS
+    # Clamp pathologically small windows (e.g. ``1``) up to the minimum so
+    # the derived ``ClientRequestToken`` cannot churn fast enough to defeat
+    # SageMaker's own idempotency bookkeeping.
+    return max(value, _MIN_IDEMPOTENCY_WINDOW_SECONDS)
+
+
+def _throttle_bucket(now: float | None = None) -> int:
+    window = _idempotency_window_seconds()
+    return int((now if now is not None else time.time()) // window)
 
 
 def _pipeline_execution_display_name(
@@ -203,18 +218,39 @@ def _pipeline_execution_display_name(
 ) -> str:
     """Deterministic display name scoped to brand + current throttle window.
 
-    SageMaker enforces that ``PipelineExecutionDisplayName`` is unique per
-    pipeline, so two starts for the same brand that fall inside the same
-    window collide and the second call fails fast (idempotent retry) instead
-    of booting a second GPU training job.
+    This label is purely for human-readable traceability in the SageMaker
+    console and for the in-flight suppressor's substring probe. SageMaker
+    does **not** enforce uniqueness of ``PipelineExecutionDisplayName``; the
+    actual duplicate-start guard is the deterministic ``ClientRequestToken``
+    passed by :func:`_pipeline_execution_client_request_token`.
     """
-    window = _idempotency_window_seconds()
-    bucket = int((now if now is not None else time.time()) // window)
+    bucket = _throttle_bucket(now)
     digest = hashlib.sha1(
         f"{pipeline_name}:{brand_id}:{bucket}".encode()
     ).hexdigest()[:12]
     safe_brand = "".join(ch if ch.isalnum() or ch == "-" else "-" for ch in brand_id)[:40]
     return f"brand-{safe_brand}-{bucket}-{digest}"
+
+
+def _pipeline_execution_client_request_token(
+    brand_id: str, pipeline_name: str, now: float | None = None
+) -> str:
+    """Deterministic ``ClientRequestToken`` scoped to brand + throttle window.
+
+    SageMaker's documented idempotency control on ``StartPipelineExecution``
+    is ``ClientRequestToken``: two starts that submit the same token return
+    the same execution ARN instead of launching a second GPU training job.
+    The token is derived purely from pipeline name, brand id and the current
+    throttle window so every concurrent invocation inside the window converges
+    on the same value without any shared mutable state.
+
+    The token must match ``[a-zA-Z0-9-]{32,128}`` per the SageMaker API; a
+    64-hex SHA-256 digest satisfies that envelope.
+    """
+    bucket = _throttle_bucket(now)
+    return hashlib.sha256(
+        f"{pipeline_name}:{brand_id}:{bucket}".encode()
+    ).hexdigest()
 
 
 def _has_in_flight_execution(sagemaker: Any, pipeline_name: str, brand_id: str) -> bool:
@@ -256,10 +292,13 @@ def eventbridge_trigger_handler(
 ) -> dict[str, Any]:
     """Start the per-brand SageMaker pipeline from an EventBridge request.
 
-    Guards against upload storms by (1) short-circuiting when an execution for
-    the same brand is already running and (2) pinning a deterministic
-    ``PipelineExecutionDisplayName`` so retries inside the throttle window
-    collide instead of launching new GPU training jobs.
+    Guards against upload storms by (1) short-circuiting when an execution
+    for the same brand is already running and (2) submitting a deterministic
+    ``ClientRequestToken`` derived from brand + throttle window so concurrent
+    retries inside the window collide at SageMaker's documented idempotency
+    layer instead of launching new GPU training jobs. A human-readable
+    ``PipelineExecutionDisplayName`` is attached for traceability but is not
+    relied on as an idempotency key.
     """
     resolved_config = config or load_config()
     detail = event.get("detail", event)
@@ -287,19 +326,20 @@ def eventbridge_trigger_handler(
         }
 
     display_name = _pipeline_execution_display_name(brand_id, pipeline_name)
-    try:
-        response = sagemaker.start_pipeline_execution(
-            PipelineName=pipeline_name,
-            PipelineParameters=_pipeline_parameters(brand_id, trigger, resolved_config),
-            PipelineExecutionDisplayName=display_name,
-        )
-    except TypeError:
-        # Test doubles / older clients that do not accept the idempotency
-        # kwarg still work; the display name is then best-effort only.
-        response = sagemaker.start_pipeline_execution(
-            PipelineName=pipeline_name,
-            PipelineParameters=_pipeline_parameters(brand_id, trigger, resolved_config),
-        )
+    client_request_token = _pipeline_execution_client_request_token(
+        brand_id, pipeline_name
+    )
+    # Fail closed: do not swallow a ``TypeError`` by retrying without the
+    # idempotency arguments. ``ClientRequestToken`` is the real duplicate-
+    # suppression control (SageMaker returns the existing execution ARN for a
+    # repeated token instead of starting a new GPU job); dropping it would
+    # defeat the whole throttle.
+    response = sagemaker.start_pipeline_execution(
+        PipelineName=pipeline_name,
+        PipelineParameters=_pipeline_parameters(brand_id, trigger, resolved_config),
+        PipelineExecutionDisplayName=display_name,
+        ClientRequestToken=client_request_token,
+    )
     return {
         "brand_id": brand_id,
         "pipeline_execution_arn": response["PipelineExecutionArn"],
