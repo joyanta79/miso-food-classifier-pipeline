@@ -88,8 +88,26 @@ results are not meaningful.
 
 ## Running locally (no AWS)
 
+Dependencies MUST be installed from the hash-locked `requirements.lock` through
+a private, write-restricted package mirror. This repository documents the
+CWE-494 "Download of Code Without Integrity Check" contract in
+`pipeline/steps/_bootstrap.py`; the developer flow follows the same rule so the
+host that generates/exports the pipeline cannot be compromised by a malicious
+public-index resolution.
+
 ```bash
-pip install -r requirements.txt
+# One-time (per maintainer): regenerate the hash-locked lockfiles against the
+# private mirror. Commit every *.lock the script produces.
+export PIP_INDEX_URL="https://pypi.example.internal/simple/"
+./scripts/compile_locks.sh
+
+# Day-to-day install: refuse any artifact that is not covered by a committed
+# sha256 digest, and refuse to fall back to the public PyPI index.
+pip install \
+    --require-hashes \
+    --only-binary=:all: \
+    --index-url "${PIP_INDEX_URL}" \
+    -r requirements.lock
 
 # Validate the DAG as JSON (no SageMaker SDK, no AWS credentials)
 python pipeline/export_definition.py --brand white-castle --output /tmp/pipeline.json
@@ -97,6 +115,12 @@ python pipeline/export_definition.py --brand white-castle --output /tmp/pipeline
 # Run the offline unit tests
 pytest -q
 ```
+
+If a maintainer does not yet have a private mirror configured, the fallback is
+`pip install --index-url "${PIP_INDEX_URL}" -r requirements.txt`, which still
+pins the direct versions but **does not** integrity-check transitive
+dependencies and is not permitted on build hosts that produce artifacts
+promoted beyond the developer workstation.
 
 ## Deploying the pipeline (requires AWS)
 
@@ -121,6 +145,25 @@ python pipeline/deploy_pipeline.py --config config.yaml --upsert
 - **ruff** lint (`ruff check .`)
 - **pytest** (offline, no AWS)
 - **terraform** `fmt -check` + `validate`
+
+### CI hardening TODO (manual, requires a workflow file change)
+
+The workflow file is intentionally not modified by automated remediation. A
+maintainer must update `.github/workflows/ci.yml` to close the CWE-494 gap
+flagged in the dependency manifests. Minimum required changes:
+
+1. Add workflow-level `permissions: { contents: read }` (no OIDC, no write).
+2. Export `PIP_INDEX_URL` from an org/repo variable pointing at a private,
+   write-restricted mirror, and pass `--index-url "${PIP_INDEX_URL}"` on
+   every `pip install` invocation.
+3. Replace the `Install dependencies` step so, when `requirements.lock`
+   exists, it runs
+   `pip install --require-hashes --only-binary=:all: --index-url "${PIP_INDEX_URL}" -r requirements.lock`.
+   Delete the unversioned `pip install ruff pytest` line — both are already
+   pinned in `requirements.txt` / `requirements.lock`.
+4. Add a `dependency-lock-drift` job that runs `./scripts/check_lock_drift.sh`
+   against the private mirror, gated on `PIP_INDEX_URL` being set, so manifest
+   and lockfile cannot silently diverge.
 
 ## License / warranty
 
