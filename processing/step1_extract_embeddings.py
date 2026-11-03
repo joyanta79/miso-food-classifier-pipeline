@@ -22,9 +22,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from collections.abc import Iterable
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import numpy as np
@@ -77,16 +78,102 @@ def _load_backbone(image_size: int, weights: str | None):
     return base
 
 
-def _resolve_image_path(record: dict[str, Any], image_root: Path | None) -> Path | None:
+def _manifest_value(record: dict[str, Any]) -> str | None:
+    """Return the manifest-supplied relative key for a record, if any."""
     value = record.get("image_path", record.get("key", record.get("id")))
     if value is None:
         return None
-    path = Path(str(value))
-    if not path.is_absolute() and image_root is not None:
-        path = image_root / path
-    if path.exists() and path.suffix.lower() in _IMAGE_SUFFIXES:
-        return path
-    return None
+    return str(value)
+
+
+def _safe_manifest_path(
+    record: dict[str, Any],
+    image_root: Path | None,
+    *,
+    require_image_suffix: bool,
+) -> Path | None:
+    """Resolve a manifest record's image path safely under ``image_root``.
+
+    Treats the manifest value as an untrusted relative key (CWE-22 hardening):
+
+    * ``image_root`` is required; callers must not resolve records relative to
+      the process CWD, which would let a manifest reach arbitrary container
+      files.
+    * The value must be a relative path with no ``..`` component and must not
+      be absolute (POSIX or Windows). An absolute value is rejected rather than
+      silently replacing ``image_root``.
+    * The joined path, after ``os.path.realpath`` normalisation, must stay
+      inside ``realpath(image_root)``.
+    * The resolved target must be an existing regular file and not a symbolic
+      link, so a planted symlink inside ``image_root`` cannot escape it.
+    * The suffix must be in ``_IMAGE_SUFFIXES``. The allowlist is applied on
+      every read path so a non-image target cannot be smuggled through the
+      deterministic fallback branch.
+
+    Returns the resolved :class:`Path` on success, or ``None`` when the value
+    is missing, out-of-root, not a regular file, or has a disallowed suffix.
+    """
+    value = _manifest_value(record)
+    if value is None:
+        return None
+    if image_root is None:
+        # Fail closed: without a root we cannot enforce containment, and
+        # resolving against the process CWD would be exactly the behaviour the
+        # hardening is meant to remove.
+        raise ValueError(
+            "image_root is required to resolve manifest image paths; "
+            "refusing to resolve relative to the process CWD."
+        )
+
+    # Reject absolute values up-front (both POSIX and Windows-style).
+    candidate = Path(value)
+    if candidate.is_absolute() or PurePosixPath(value).is_absolute() or ":" in value[:3]:
+        return None
+    # Reject any traversal component before touching the filesystem.
+    posix = PurePosixPath(value)
+    if any(part == ".." for part in posix.parts) or any(
+        part == ".." for part in Path(value).parts
+    ):
+        return None
+
+    root_real = os.path.realpath(str(image_root))
+    joined_real = os.path.realpath(os.path.join(root_real, value))
+    # Containment check: joined must equal root or be a descendant of it.
+    root_prefix = root_real.rstrip(os.sep) + os.sep
+    if joined_real != root_real and not joined_real.startswith(root_prefix):
+        return None
+
+    path = Path(joined_real)
+    # Refuse symlinks explicitly so a symlink planted inside the root cannot
+    # escape it (even though realpath above would already dereference it; this
+    # guards against races and makes intent explicit).
+    try:
+        if path.is_symlink():
+            return None
+    except OSError:
+        return None
+    if not path.is_file():
+        return None
+    if require_image_suffix and path.suffix.lower() not in _IMAGE_SUFFIXES:
+        return None
+    if path.suffix.lower() not in _IMAGE_SUFFIXES:
+        # Even on the deterministic branch, only known image suffixes are
+        # readable. A manifest cannot downgrade a record to the deterministic
+        # backend as a trick to read non-image files.
+        return None
+    return path
+
+
+def _resolve_image_path(record: dict[str, Any], image_root: Path | None) -> Path | None:
+    """Return the on-disk image path for a record, or ``None`` if it is unsafe.
+
+    Preserved as a module-level helper for backwards compatibility; delegates
+    to :func:`_safe_manifest_path`.
+    """
+    try:
+        return _safe_manifest_path(record, image_root, require_image_suffix=True)
+    except ValueError:
+        return None
 
 
 def _real_embedding(path: Path, image_size: int, weights: str | None) -> np.ndarray | None:
@@ -112,17 +199,20 @@ def _real_embedding(path: Path, image_size: int, weights: str | None) -> np.ndar
 def _read_local_payload(record: dict[str, Any], image_root: Path | None) -> bytes:
     """Return the raw bytes of the record's image, raising if it cannot be opened.
 
-    Fail-closed: never substitute the filename string for image bytes. If the
-    referenced path does not resolve on disk, raise ``FileNotFoundError`` so the
-    caller can either exclude the record or surface the error to the operator.
+    Fail-closed: the manifest-supplied value is treated as an untrusted relative
+    key under ``image_root``. Absolute values, ``..`` traversal, symlinks,
+    non-regular files, and non-image suffixes are all rejected (see
+    :func:`_safe_manifest_path`). If the referenced path does not resolve to a
+    safe in-root image file, ``FileNotFoundError`` is raised so the caller can
+    either exclude the record or surface the error to the operator; the
+    filename string is never substituted for image bytes.
     """
-    value = record.get("image_path", record.get("key", record["id"]))
-    path = Path(str(value))
-    if not path.is_absolute() and image_root is not None:
-        path = image_root / path
-    if not path.exists():
+    value = _manifest_value(record)
+    path = _safe_manifest_path(record, image_root, require_image_suffix=True)
+    if path is None:
         raise FileNotFoundError(
-            f"Image for record {record.get('id', value)!r} not found at {path!s}; "
+            f"Image for record {record.get('id', value)!r} could not be resolved "
+            f"to a safe in-root image file under {image_root!s}; "
             "refusing to substitute the filename string for image bytes."
         )
     return path.read_bytes()
@@ -181,7 +271,15 @@ def extract_embeddings(
     deterministic embedding. Set it False to force the deterministic path (CI).
     """
     records = list(manifest)
-    root = Path(image_root) if image_root is not None else None
+    if image_root is None:
+        if records:
+            raise ValueError(
+                "extract_embeddings requires image_root; manifest paths must be "
+                "resolved against a known root, never the process CWD."
+            )
+        root = None
+    else:
+        root = Path(image_root)
     if records:
         pairs = [
             _embed_record(
@@ -230,7 +328,7 @@ def main() -> None:
     )
     parser.add_argument("--manifest", default="/opt/ml/processing/input/curated_manifest.json")
     parser.add_argument("--output-dir", default="/opt/ml/processing/output")
-    parser.add_argument("--image-root")
+    parser.add_argument("--image-root", required=True)
     parser.add_argument("--embedding-dim", type=int, default=DEFAULT_EMBEDDING_DIM)
     parser.add_argument("--image-size", type=int, default=DEFAULT_IMAGE_SIZE)
     parser.add_argument("--cosine-dedup-threshold", type=float, default=0.99)
