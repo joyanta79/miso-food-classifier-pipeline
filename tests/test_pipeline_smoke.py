@@ -121,6 +121,8 @@ def test_safety_gate_right_values_are_literal_and_match_config() -> None:
     assert _right_values("CleanlabQualityGate") == [
         cleanlab["flag_threshold_fraction"],
         "cleanlab",
+        selection["target_dataset_min"],
+        selection["min_images_per_class"],
     ]
     assert _right_values("DatasetBoundsGate") == [
         selection["target_dataset_min"],
