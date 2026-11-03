@@ -146,10 +146,25 @@ def test_eventbridge_trigger_uses_custom_prefix_env(
     assert sagemaker.calls[0]["PipelineName"] == "tenant-pipelines-brand-b"
 
 
+def _authed_event(body: Any, allowed_brands: str = "white-castle,brand-b") -> dict[str, Any]:
+    """Build an API Gateway proxy event with an authenticated principal."""
+    return {
+        "body": body,
+        "requestContext": {
+            "authorizer": {
+                "claims": {
+                    "sub": "user-123",
+                    "allowed_brands": allowed_brands,
+                }
+            }
+        },
+    }
+
+
 def test_manual_trigger_accepts_json_body(config: dict[str, Any]) -> None:
     sagemaker = SageMakerMock()
     result = manual_trigger_handler(
-        {"body": json.dumps({"brand_id": "white-castle"})},
+        _authed_event(json.dumps({"brand_id": "white-castle"})),
         None,
         sagemaker_client=sagemaker,
         config=config,
@@ -167,14 +182,14 @@ def test_manual_trigger_rejects_unknown_fields(config: dict[str, Any]) -> None:
     sagemaker = SageMakerMock()
     with pytest.raises(ValueError, match="Unexpected field"):
         manual_trigger_handler(
-            {
-                "body": json.dumps(
+            _authed_event(
+                json.dumps(
                     {
                         "brand_id": "white-castle",
                         "pipeline_name": "attacker-chosen",
                     }
                 )
-            },
+            ),
             None,
             sagemaker_client=sagemaker,
             config=config,
@@ -183,7 +198,67 @@ def test_manual_trigger_rejects_unknown_fields(config: dict[str, Any]) -> None:
 
 
 def test_manual_trigger_rejects_unknown_brand(config: dict[str, Any]) -> None:
-    with pytest.raises(ValueError, match="Unknown brand_id"):
+    with pytest.raises((PermissionError, ValueError)):
         manual_trigger_handler(
-            {"brand_id": "not-a-brand"}, None, sagemaker_client=SageMakerMock(), config=config
+            _authed_event({"brand_id": "not-a-brand"}),
+            None,
+            sagemaker_client=SageMakerMock(),
+            config=config,
         )
+
+
+def test_manual_trigger_rejects_missing_authorizer(config: dict[str, Any]) -> None:
+    with pytest.raises(PermissionError):
+        manual_trigger_handler(
+            {"body": json.dumps({"brand_id": "white-castle"})},
+            None,
+            sagemaker_client=SageMakerMock(),
+            config=config,
+        )
+
+
+def test_manual_trigger_rejects_empty_authorizer(config: dict[str, Any]) -> None:
+    with pytest.raises(PermissionError):
+        manual_trigger_handler(
+            {
+                "body": json.dumps({"brand_id": "white-castle"}),
+                "requestContext": {"authorizer": {}},
+            },
+            None,
+            sagemaker_client=SageMakerMock(),
+            config=config,
+        )
+
+
+def test_manual_trigger_rejects_brand_outside_principal_binding(
+    config: dict[str, Any],
+) -> None:
+    with pytest.raises(PermissionError):
+        manual_trigger_handler(
+            _authed_event(
+                json.dumps({"brand_id": "brand-b"}),
+                allowed_brands="white-castle",
+            ),
+            None,
+            sagemaker_client=SageMakerMock(),
+            config=config,
+        )
+
+
+def test_manual_trigger_accepts_cognito_groups_brand_binding(
+    config: dict[str, Any],
+) -> None:
+    sagemaker = SageMakerMock()
+    event = {
+        "body": json.dumps({"brand_id": "brand-b"}),
+        "requestContext": {
+            "authorizer": {
+                "claims": {
+                    "sub": "user-123",
+                    "cognito:groups": "brand:brand-b,ops",
+                }
+            }
+        },
+    }
+    result = manual_trigger_handler(event, None, sagemaker_client=sagemaker, config=config)
+    assert result["brand_id"] == "brand-b"
