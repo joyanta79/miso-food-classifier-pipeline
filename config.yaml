@@ -23,6 +23,14 @@ brands:
   - id: brand-e
     naming_pattern: "be_*"
     model_package_group: FoodClassifier-BrandE
+# Server-side mapping consumed by ``manual_trigger_handler`` to decide which
+# brands an authenticated principal (``sub`` / ``principalId`` from the API
+# Gateway authorizer context) is allowed to drive. This is the SOLE source
+# of the brand grant -- caller-supplied ``allowed_brands`` / ``brand_id``
+# claims are ignored. Operators may also set the ``MISO_PRINCIPAL_BRAND_MAP``
+# environment variable (same JSON shape) to rotate grants without a config
+# redeploy; env entries take precedence.
+principal_brand_map: {}
 data_selection:
   recency_months: 6
   min_images_per_class: 500

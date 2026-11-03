@@ -20,6 +20,22 @@ def config() -> dict[str, Any]:
             {"id": "white-castle", "naming_pattern": "wc_*"},
             {"id": "brand-b", "naming_pattern": "bb_*"},
         ],
+        # Server-side principal-to-brand mapping consumed by the manual-trigger
+        # authorization gate. Keeping it in the test config exercises the
+        # mapping path without needing environment setup.
+        "principal_brand_map": {
+            "user-123": ["white-castle", "brand-b"],
+            "user-wc-only": ["white-castle"],
+        },
+    }
+
+
+def _eb_event(detail: dict[str, Any]) -> dict[str, Any]:
+    """Build a minimal EventBridge event with trusted provenance."""
+    return {
+        "source": "miso.ml.training",
+        "detail-type": "BrandTrainingRequested",
+        "detail": detail,
     }
 
 
@@ -92,7 +108,7 @@ def test_s3_eventbridge_shape_ignores_unknown_brand(config: dict[str, Any]) -> N
 def test_eventbridge_trigger_starts_brand_pipeline(config: dict[str, Any]) -> None:
     sagemaker = SageMakerMock()
     result = eventbridge_trigger_handler(
-        {"detail": {"brand_id": "brand-b", "trigger": "s3"}},
+        _eb_event({"brand_id": "brand-b", "trigger": "s3"}),
         None,
         sagemaker_client=sagemaker,
         config=config,
@@ -117,13 +133,13 @@ def test_eventbridge_trigger_ignores_caller_pipeline_name(
 ) -> None:
     sagemaker = SageMakerMock()
     eventbridge_trigger_handler(
-        {
-            "detail": {
+        _eb_event(
+            {
                 "brand_id": "white-castle",
                 "pipeline_name": "attacker-chosen",
                 "trigger": "s3",
             }
-        },
+        ),
         None,
         sagemaker_client=sagemaker,
         config=config,
@@ -138,7 +154,7 @@ def test_eventbridge_trigger_uses_custom_prefix_env(
     monkeypatch.setenv("MISO_PIPELINE_NAME_PREFIX", "tenant-pipelines")
     sagemaker = SageMakerMock()
     eventbridge_trigger_handler(
-        {"detail": {"brand_id": "brand-b", "trigger": "s3"}},
+        _eb_event({"brand_id": "brand-b", "trigger": "s3"}),
         None,
         sagemaker_client=sagemaker,
         config=config,
@@ -147,15 +163,18 @@ def test_eventbridge_trigger_uses_custom_prefix_env(
     assert sagemaker.calls[0]["PipelineName"] == "tenant-pipelines-brand-b"
 
 
-def _authed_event(body: Any, allowed_brands: str = "white-castle,brand-b") -> dict[str, Any]:
-    """Build an API Gateway proxy event with an authenticated principal."""
+def _authed_event(body: Any, sub: str = "user-123") -> dict[str, Any]:
+    """Build an API Gateway proxy event with an authenticated principal.
+
+    The brand grant is NOT in the event; it is resolved server-side from
+    ``config['principal_brand_map']`` keyed by the verified ``sub`` claim.
+    """
     return {
         "body": body,
         "requestContext": {
             "authorizer": {
                 "claims": {
-                    "sub": "user-123",
-                    "allowed_brands": allowed_brands,
+                    "sub": sub,
                 }
             }
         },
@@ -289,7 +308,7 @@ def test_eventbridge_trigger_skips_when_execution_in_flight(config: dict[str, An
 
     sagemaker = SageMakerWithRunningExecution()
     result = eventbridge_trigger_handler(
-        {"detail": {"brand_id": "brand-b", "trigger": "s3"}},
+        _eb_event({"brand_id": "brand-b", "trigger": "s3"}),
         None,
         sagemaker_client=sagemaker,
         config=config,
@@ -340,7 +359,7 @@ def test_manual_trigger_rejects_brand_outside_principal_binding(
         manual_trigger_handler(
             _authed_event(
                 json.dumps({"brand_id": "brand-b"}),
-                allowed_brands="white-castle",
+                sub="user-wc-only",
             ),
             None,
             sagemaker_client=SageMakerMock(),
@@ -365,4 +384,101 @@ def test_manual_trigger_accepts_cognito_groups_brand_binding(
     }
     result = manual_trigger_handler(event, None, sagemaker_client=sagemaker, config=config)
     assert result["brand_id"] == "brand-b"
+
+
+def test_manual_trigger_rejects_authorizer_without_principal_id(
+    config: dict[str, Any],
+) -> None:
+    """An authorizer context with no verified sub/principalId is rejected."""
+    event = {
+        "body": json.dumps({"brand_id": "white-castle"}),
+        "requestContext": {
+            # Mimics the pre-remediation PoC: an authorizer block that asserts
+            # a brand but carries no verified principal id. Must be rejected.
+            "authorizer": {"brand_id": "white-castle"}
+        },
+    }
+    with pytest.raises(PermissionError):
+        manual_trigger_handler(event, None, sagemaker_client=SageMakerMock(), config=config)
+
+
+def test_manual_trigger_ignores_caller_supplied_allowed_brands_claim(
+    config: dict[str, Any],
+) -> None:
+    """Self-asserted ``allowed_brands`` and ``brand_id`` claims do not grant.
+
+    The brand grant must come from the server-side ``principal_brand_map``,
+    keyed by the verified ``sub``. A caller whose sub is not in the mapping
+    cannot grant themselves brands by setting ``allowed_brands`` in the
+    authorizer block.
+    """
+    event = {
+        "body": json.dumps({"brand_id": "brand-b"}),
+        "requestContext": {
+            "authorizer": {
+                "claims": {
+                    "sub": "unmapped-attacker",
+                    "allowed_brands": "white-castle,brand-b",
+                    "brand_id": "brand-b",
+                }
+            }
+        },
+    }
+    with pytest.raises(PermissionError):
+        manual_trigger_handler(event, None, sagemaker_client=SageMakerMock(), config=config)
+
+
+def test_manual_trigger_uses_env_principal_brand_map(
+    config: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``MISO_PRINCIPAL_BRAND_MAP`` env grants brands to an authenticated sub."""
+    monkeypatch.setenv(
+        "MISO_PRINCIPAL_BRAND_MAP",
+        json.dumps({"env-user": ["brand-b"]}),
+    )
+    sagemaker = SageMakerMock()
+    result = manual_trigger_handler(
+        {
+            "body": json.dumps({"brand_id": "brand-b"}),
+            "requestContext": {"authorizer": {"claims": {"sub": "env-user"}}},
+        },
+        None,
+        sagemaker_client=sagemaker,
+        config=config,
+    )
+    assert result["brand_id"] == "brand-b"
+
+
+def test_eventbridge_trigger_rejects_untrusted_direct_invocation(
+    config: dict[str, Any],
+) -> None:
+    """A hand-crafted direct invoke without the trusted source is rejected."""
+    with pytest.raises(PermissionError):
+        eventbridge_trigger_handler(
+            {"detail": {"brand_id": "brand-b", "trigger": "manual"}},
+            None,
+            sagemaker_client=SageMakerMock(),
+            config=config,
+        )
+
+
+def test_eventbridge_trigger_rejects_api_gateway_shaped_event(
+    config: dict[str, Any],
+) -> None:
+    """A sibling direct-invoke that mimics an API Gateway proxy event is rejected.
+
+    This closes the ``eventbridge_trigger`` bypass of the manual-trigger
+    authorization gate: callers who can shape the raw event must go through
+    ``manual_trigger_handler`` so the principal is re-verified.
+    """
+    with pytest.raises(PermissionError):
+        eventbridge_trigger_handler(
+            {
+                "requestContext": {"authorizer": {"claims": {"sub": "anyone"}}},
+                "detail": {"brand_id": "brand-b"},
+            },
+            None,
+            sagemaker_client=SageMakerMock(),
+            config=config,
+        )
 

@@ -42,6 +42,21 @@ _DEFAULT_IDEMPOTENCY_WINDOW_SECONDS = 300
 # therefore suppress a new start for the same brand.
 _IN_FLIGHT_PIPELINE_STATES = frozenset({"Executing", "Stopping"})
 
+# Trusted EventBridge sources permitted to invoke ``eventbridge_trigger_handler``.
+# Any event whose top-level ``source`` is not in this set, and that does not
+# carry the in-process ``_trusted_invocation`` marker set by
+# ``manual_trigger_handler`` after it has re-authorized the caller, is rejected.
+# This closes the sibling-entry-point bypass: an attacker who can direct-invoke
+# ``eventbridge_trigger_handler`` with a hand-crafted ``{"detail": ...}`` payload
+# must now also forge a provenance marker that the Lambda runtime does not
+# propagate from the caller.
+_TRUSTED_EVENTBRIDGE_SOURCES = frozenset({"miso.ml.training"})
+
+# Sentinel used by ``manual_trigger_handler`` to tag the EventBridge-shaped
+# event it forwards into ``eventbridge_trigger_handler`` after it has verified
+# the authenticated principal. Chosen as an object identity, not a string, so
+# a client-supplied JSON payload cannot replicate it.
+
 
 def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
     """Load the shared project configuration without mutating it."""
@@ -247,6 +262,50 @@ def _has_in_flight_execution(sagemaker: Any, pipeline_name: str, brand_id: str) 
     return False
 
 
+_TRUSTED_INVOCATION_SENTINEL = object()
+
+
+def _assert_trusted_eventbridge_caller(event: dict[str, Any]) -> None:
+    """Reject invocations that cannot be attributed to a trusted event source.
+
+    ``eventbridge_trigger_handler`` performs no caller authentication of its
+    own and starts another tenant's SageMaker pipeline on success. Any invoker
+    able to shape the raw Lambda event (direct ``lambda:InvokeFunction`` or a
+    pass-through API Gateway integration) could otherwise bypass the
+    manual-trigger authorization gate just by hand-crafting a bare
+    ``{"detail": {"brand_id": ...}}`` payload. The infra-side control for this
+    is an ``aws_lambda_permission`` scoped to the EventBridge rule's ARN; this
+    code-side check is a defense-in-depth that also closes the gap when the
+    function is deployed without that resource policy.
+    """
+    if not isinstance(event, dict):
+        raise PermissionError(
+            "eventbridge_trigger_handler received a non-dict event"
+        )
+    # Internal re-entry from ``manual_trigger_handler`` after it has
+    # re-authorized the caller is tagged with an object-identity sentinel the
+    # caller cannot forge through a JSON payload.
+    if event.get("_trusted_invocation") is _TRUSTED_INVOCATION_SENTINEL:
+        return
+    # An authorizer block on the event means this invocation was shaped like
+    # an API Gateway proxy request; such a request must flow through
+    # ``manual_trigger_handler`` so the principal is re-verified. Reject it
+    # here so a sibling direct-invoke cannot be used to skip that gate.
+    request_context = event.get("requestContext")
+    if isinstance(request_context, dict) and request_context.get("authorizer"):
+        raise PermissionError(
+            "eventbridge_trigger_handler rejected a request shaped as an API "
+            "Gateway proxy event; manual invocations must go through "
+            "manual_trigger_handler"
+        )
+    source = event.get("source")
+    if not isinstance(source, str) or source not in _TRUSTED_EVENTBRIDGE_SOURCES:
+        raise PermissionError(
+            "eventbridge_trigger_handler rejected an event from an untrusted "
+            f"source: {source!r}"
+        )
+
+
 def eventbridge_trigger_handler(
     event: dict[str, Any],
     _context: Any,
@@ -260,7 +319,13 @@ def eventbridge_trigger_handler(
     the same brand is already running and (2) pinning a deterministic
     ``PipelineExecutionDisplayName`` so retries inside the throttle window
     collide instead of launching new GPU training jobs.
+
+    Caller provenance is enforced via
+    :func:`_assert_trusted_eventbridge_caller`: only genuine EventBridge
+    deliveries from the configured source (or the in-process re-entry from
+    ``manual_trigger_handler``) are accepted.
     """
+    _assert_trusted_eventbridge_caller(event)
     resolved_config = config or load_config()
     detail = event.get("detail", event)
     if isinstance(detail, str):
@@ -344,19 +409,89 @@ def _split_claim_values(value: Any) -> list[str]:
     ]
 
 
-def _authorized_brands(event: dict[str, Any]) -> set[str]:
+def _principal_brand_map(config: dict[str, Any] | None) -> dict[str, set[str]]:
+    """Load the server-side principal-to-brand mapping.
+
+    The mapping is a trusted, deployment-controlled artifact (NOT a value the
+    caller can supply inside the request). Two sources are consulted, with the
+    environment variable taking precedence so operators can rotate grants
+    without redeploying code or config:
+
+      * ``MISO_PRINCIPAL_BRAND_MAP`` env var, a JSON object of the form
+        ``{"<sub>": ["brand-a", "brand-b"], ...}``.
+      * ``principal_brand_map`` top-level key in ``config.yaml`` with the
+        same shape.
+
+    Values may be a list, a comma/space/JSON-array-encoded string, or a single
+    brand id. Unknown principals map to the empty set so the caller is
+    rejected by the manual-trigger gate without disclosing which principals
+    are provisioned.
+    """
+    mapping: dict[str, set[str]] = {}
+    raw_env = os.environ.get("MISO_PRINCIPAL_BRAND_MAP")
+    if raw_env:
+        try:
+            parsed_env = json.loads(raw_env)
+        except ValueError:
+            parsed_env = None
+        if isinstance(parsed_env, dict):
+            for principal, brands in parsed_env.items():
+                if not isinstance(principal, str) or not principal:
+                    continue
+                mapping.setdefault(principal, set()).update(_split_claim_values(brands))
+    config_map = None
+    if isinstance(config, dict):
+        config_map = config.get("principal_brand_map")
+    if isinstance(config_map, dict):
+        for principal, brands in config_map.items():
+            if not isinstance(principal, str) or not principal:
+                continue
+            mapping.setdefault(principal, set()).update(_split_claim_values(brands))
+    return mapping
+
+
+def _principal_from_authorizer(authorizer: dict[str, Any]) -> str | None:
+    """Extract a verified principal identifier from an authorizer context.
+
+    Looks for ``sub`` or ``principalId`` in (in order) the top-level
+    authorizer dict, its ``claims`` child, and its ``jwt.claims`` child. The
+    first non-empty string found wins. Any other type (number, dict, list)
+    is ignored so a caller cannot sneak a structured value past a loose
+    ``if principal:`` check downstream.
+    """
+    claims = authorizer.get("claims") if isinstance(authorizer.get("claims"), dict) else {}
+    jwt_block = authorizer.get("jwt") if isinstance(authorizer.get("jwt"), dict) else {}
+    jwt_claims = jwt_block.get("claims") if isinstance(jwt_block.get("claims"), dict) else {}
+    for source in (authorizer, claims, jwt_claims):
+        for key in ("sub", "principalId"):
+            value = source.get(key) if isinstance(source, dict) else None
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _authorized_brands(
+    event: dict[str, Any], config: dict[str, Any] | None = None
+) -> set[str]:
     """Return the set of brand ids the authenticated caller is allowed to drive.
 
     The caller identity must come from an upstream API Gateway authorizer (JWT,
     Cognito, or Lambda authorizer) or REQUEST authorizer context propagated in
     ``event['requestContext']['authorizer']``. If no authorizer context is
-    present the request is treated as unauthenticated and rejected.
+    present, or the authorizer context carries no verified principal
+    identifier (``sub`` / ``principalId``), the request is rejected as
+    unauthenticated.
 
-    The allowed brand set is sourced from, in priority order:
-      * ``allowed_brands`` claim/context value (comma / space / JSON list).
-      * ``brand_id`` claim/context value (single brand binding).
-      * ``cognito:groups`` claim entries that start with ``brand:`` (e.g.
-        ``brand:white-castle``).
+    The brand grant itself is **not** read from the request. It is resolved
+    from a server-side principal-to-brand mapping (see
+    :func:`_principal_brand_map`) keyed by the verified principal id, so a
+    caller cannot self-elevate by injecting an ``allowed_brands`` or
+    ``brand_id`` claim. ``cognito:groups`` entries of the form ``brand:<id>``
+    are honored as a defense-in-depth fallback **only when** the IdP-controlled
+    group claim is present alongside a verified ``sub`` -- a caller shaping the
+    raw event payload cannot forge the Cognito-signed group claim upstream of
+    this handler, but if there is any doubt, the server-side mapping should
+    be the sole source.
     """
     request_context = event.get("requestContext") if isinstance(event, dict) else None
     if not isinstance(request_context, dict):
@@ -369,24 +504,29 @@ def _authorized_brands(event: dict[str, Any]) -> set[str]:
             "Unauthenticated manual training request: missing authorizer context"
         )
 
-    # JWT / Cognito authorizers nest verified claims under ``claims``; Lambda
-    # (REQUEST/TOKEN) authorizers place context fields directly on authorizer.
+    principal = _principal_from_authorizer(authorizer)
+    if principal is None:
+        raise PermissionError(
+            "Unauthenticated manual training request: authorizer context has "
+            "no verified principal identifier (sub/principalId)"
+        )
+
+    allowed: set[str] = set(_principal_brand_map(config).get(principal, set()))
+
+    # ``cognito:groups`` is written by Cognito from the user's group
+    # memberships, not from a value the client sends in the request. Honor
+    # it as a secondary binding so operators who manage tenancy via Cognito
+    # groups do not have to maintain a parallel mapping, but only after a
+    # principal id has been verified above.
     claims = authorizer.get("claims") if isinstance(authorizer.get("claims"), dict) else {}
     jwt_block = authorizer.get("jwt") if isinstance(authorizer.get("jwt"), dict) else {}
     jwt_claims = jwt_block.get("claims") if isinstance(jwt_block.get("claims"), dict) else {}
-
-    def _lookup(key: str) -> Any:
-        for source in (claims, jwt_claims, authorizer):
-            if isinstance(source, dict) and key in source and source[key] not in (None, ""):
-                return source[key]
-        return None
-
-    allowed: set[str] = set()
-    allowed.update(_split_claim_values(_lookup("allowed_brands")))
-    allowed.update(_split_claim_values(_lookup("brand_id")))
-    for group in _split_claim_values(_lookup("cognito:groups")):
-        if group.startswith("brand:") and len(group) > len("brand:"):
-            allowed.add(group.split(":", 1)[1])
+    for source in (claims, jwt_claims, authorizer):
+        if not isinstance(source, dict):
+            continue
+        for group in _split_claim_values(source.get("cognito:groups")):
+            if group.startswith("brand:") and len(group) > len("brand:"):
+                allowed.add(group.split(":", 1)[1])
     return allowed
 
 
@@ -401,12 +541,15 @@ def manual_trigger_handler(
 
     The caller identity must be established upstream (API Gateway JWT/Cognito
     authorizer, Lambda authorizer, or equivalent) and surfaced through
-    ``event['requestContext']['authorizer']``. The handler authorizes the
-    requested ``brand_id`` against the brand set bound to that principal and
-    rejects any brand outside it, regardless of whether the brand is listed in
-    ``config.yaml``.
+    ``event['requestContext']['authorizer']``. The handler requires a verified
+    principal identifier (``sub`` or ``principalId``) and authorizes the
+    requested ``brand_id`` against the brand set bound to that principal in
+    the deployment-controlled principal-to-brand mapping (see
+    :func:`_principal_brand_map`), rejecting any brand outside it, regardless
+    of whether the brand is listed in ``config.yaml``.
     """
-    allowed_brands = _authorized_brands(event)
+    resolved_config = config or load_config()
+    allowed_brands = _authorized_brands(event, resolved_config)
     if not allowed_brands:
         raise PermissionError(
             "Authenticated principal is not authorized for any brand"
@@ -438,8 +581,15 @@ def manual_trigger_handler(
         )
 
     return eventbridge_trigger_handler(
-        {"detail": {"brand_id": brand_id, "trigger": "manual"}},
+        {
+            "detail": {"brand_id": brand_id, "trigger": "manual"},
+            # Object-identity sentinel: ``manual_trigger_handler`` has already
+            # verified the caller; signal that to the downstream provenance
+            # check so it does not reject the in-process re-entry. A client
+            # cannot replicate this through a JSON payload.
+            "_trusted_invocation": _TRUSTED_INVOCATION_SENTINEL,
+        },
         context,
         sagemaker_client=sagemaker_client,
-        config=config,
+        config=resolved_config,
     )
