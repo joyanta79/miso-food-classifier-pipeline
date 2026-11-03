@@ -56,7 +56,10 @@ data "aws_iam_policy_document" "sagemaker_permissions" {
     resources = local.bucket_arns
   }
 
-  # SageMaker jobs, pipelines, and registry within this account/region.
+  # SageMaker jobs and registry within this account/region. ``StartPipelineExecution``
+  # is split out below and scoped to the specific per-brand pipeline ARNs so a
+  # misbehaving caller cannot start arbitrary pipelines in the account (confused
+  # deputy).
   statement {
     sid = "SageMakerJobs"
     actions = [
@@ -70,10 +73,18 @@ data "aws_iam_policy_document" "sagemaker_permissions" {
       "sagemaker:DescribeModelPackageGroup",
       "sagemaker:ListModelPackages",
       "sagemaker:AddTags",
-      "sagemaker:StartPipelineExecution",
       "sagemaker:DescribePipelineExecution",
     ]
     resources = ["arn:aws:sagemaker:${var.aws_region}:${data.aws_caller_identity.current.account_id}:*"]
+  }
+
+  # Start-pipeline is restricted to the per-brand pipelines Terraform creates in
+  # this stack. Any other pipeline in the account is out of reach even if a
+  # caller manages to influence the ``PipelineName`` passed by the handler.
+  statement {
+    sid       = "StartBrandPipelines"
+    actions   = ["sagemaker:StartPipelineExecution"]
+    resources = [for p in aws_sagemaker_pipeline.brand : p.arn]
   }
 
   # CloudWatch Logs for job output.

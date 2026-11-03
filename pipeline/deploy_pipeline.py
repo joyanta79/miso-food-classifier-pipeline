@@ -19,21 +19,30 @@ Every step is its own SageMaker job. Thresholds come from a config file
 the manual-approval gate).
 
 Usage:
-    python pipeline/deploy_pipeline.py --config config.smoke.yaml --upsert --run
+    # Production deployment:
+    python pipeline/deploy_pipeline.py --config config.yaml --images-uri s3://... --upsert
+
+    # Smoke run (relaxed overlay) — a smoke pipeline name and an explicit
+    # acknowledgement are required so --upsert cannot overwrite the
+    # Terraform-managed production pipeline:
+    python pipeline/deploy_pipeline.py --config config.smoke.yaml \\
+        --images-uri s3://... --upsert --run \\
+        --i-understand-this-is-a-smoke-config
 """
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
-import yaml
 from sagemaker.estimator import Estimator
 from sagemaker.image_uris import retrieve
 from sagemaker.model import Model
 from sagemaker.processing import ProcessingInput, ProcessingOutput, ScriptProcessor
 from sagemaker.workflow.condition_step import ConditionStep
 from sagemaker.workflow.conditions import (
+    ConditionEquals,
     ConditionGreaterThanOrEqualTo,
     ConditionLessThanOrEqualTo,
 )
@@ -48,18 +57,86 @@ from sagemaker.workflow.steps import ProcessingStep, TrainingStep
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STEPS_DIR = PROJECT_ROOT / "pipeline" / "steps"
 
+# Production safety floors. ``load_config`` already enforces structure via
+# ``pipeline.load_config``; this table enforces the *values*: a config is
+# considered "relaxed" (smoke-only) when any field here is weaker than its
+# production floor from config.yaml. ``op`` is the direction a value must
+# satisfy to be at-least-as-strict-as-production.
+#   "ge": production value is a minimum (config value must be >= floor)
+#   "le": production value is a maximum (config value must be <= floor)
+PRODUCTION_GATE_FLOORS: tuple[tuple[str, str, float, str], ...] = (
+    ("data_selection", "min_images_per_class", 500, "ge"),
+    ("data_selection", "target_dataset_min", 6000, "ge"),
+    ("cleanlab", "flag_threshold_fraction", 0.05, "le"),
+    ("evaluation", "accuracy_threshold", 0.97, "ge"),
+    ("evaluation", "fp_rate_emergency_threshold", 0.05, "le"),
+    ("evaluation", "latency_budget_ms", 1000, "le"),
+    ("drift", "level1_confidence_floor", 0.65, "ge"),
+)
 
-def load_config(path: str) -> dict:
-    return yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+PRODUCTION_PIPELINE_PREFIX = "miso-food-classifier"
+SMOKE_PIPELINE_PREFIX = "smoke-miso-food-classifier"
 
 
-def build(config: dict, code_prefix: str, images_uri: str) -> Pipeline:
+def load_config(path: str) -> dict[str, Any]:
+    """Load the deploy configuration using the shared validator.
+
+    Delegates to :func:`pipeline.pipeline.load_config` so that required sections
+    and the brand list are validated before anything is deployed. The import is
+    performed lazily to keep this module importable without the shared package
+    being on ``sys.path`` at module import time (the script runs from the repo
+    root).
+    """
+    from pipeline.pipeline import load_config as _shared_load_config  # noqa: WPS433
+
+    return _shared_load_config(path)
+
+
+def _relaxed_fields(config: dict[str, Any]) -> list[str]:
+    """Return the list of fields whose values are weaker than the production floor."""
+    weak: list[str] = []
+    for section, key, floor, op in PRODUCTION_GATE_FLOORS:
+        section_cfg = config.get(section) or {}
+        if key not in section_cfg:
+            continue
+        value = section_cfg[key]
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if op == "ge" and numeric < float(floor):
+            weak.append(f"{section}.{key}={value} < production floor {floor}")
+        elif op == "le" and numeric > float(floor):
+            weak.append(f"{section}.{key}={value} > production floor {floor}")
+    return weak
+
+
+def build(
+    config: dict,
+    code_prefix: str,
+    images_uri: str,
+    pipeline_name: str | None = None,
+) -> Pipeline:
+    """Build the Miso SageMaker Pipeline for the first configured brand.
+
+    ``images_uri`` MUST point at this brand's dedicated raw-image prefix
+    (``s3://<raw-archive-bucket>/<brand.id>/``), not at the bucket root --
+    the step container only cross-checks the ``<brand>`` token in each
+    filename as defence in depth. Scope the upload credentials for the raw
+    archive to the same prefix (``s3:prefix`` IAM condition) to prevent
+    cross-brand data mixing (CWE-639).
+    """
+    from pipeline.pipeline import get_brand  # noqa: WPS433 (lazy, see load_config)
+
     region = config["aws"]["region"]
     role = config["aws"]["sagemaker_role_arn"]
     bucket = config["s3"]["pipeline_artifacts_bucket"]
-    brand = config["brands"][0]
-    brand_id = brand["id"]
-    group = brand["model_package_group"]
+    first_brand_id = config["brands"][0]["id"]
+    # Validate the brand against the declared registry group (refuses arbitrary
+    # package-group combinations) instead of trusting config["brands"][0] blindly.
+    brand = get_brand(config, first_brand_id)
+    brand_id = brand.id
+    group = brand.model_package_group
     sel = config["data_selection"]
     session = PipelineSession()
 
@@ -174,6 +251,8 @@ def build(config: dict, code_prefix: str, images_uri: str) -> Pipeline:
                 "CLEANLAB_FLAG_THRESHOLD_FRACTION": str(
                     config["cleanlab"]["flag_threshold_fraction"]
                 ),
+                "TARGET_DATASET_MIN": str(sel["target_dataset_min"]),
+                "MIN_IMAGES_PER_CLASS": str(sel["min_images_per_class"]),
             }
         ).run(
             code=str(STEPS_DIR / "kfold_cleanlab.py"),
@@ -210,14 +289,26 @@ def build(config: dict, code_prefix: str, images_uri: str) -> Pipeline:
     drift_step = ProcessingStep(
         name="DetectDrift",
         step_args=processor(
-            {"CONFIDENCE_BASELINE": str(config["drift"]["confidence_baseline"])}
+            {
+                "CONFIDENCE_BASELINE": str(config["drift"]["confidence_baseline"]),
+                "LEVEL1_CONFIDENCE_FLOOR": str(config["drift"]["level1_confidence_floor"]),
+                "LEVEL2_CONFIDENCE_THRESHOLD": str(
+                    config["drift"]["level2_confidence_threshold"]
+                ),
+                "CORRECTION_RATE_MULTIPLIER": str(
+                    config["drift"]["correction_rate_multiplier"]
+                ),
+            }
         ).run(
             code=str(STEPS_DIR / "drift_detection.py"),
             inputs=[
                 code_input,
+                # Reads pred_probs.npy persisted by KFoldCleanlabQuality so the
+                # drift step can measure real mean confidence instead of
+                # falling back to the configured baseline.
                 ProcessingInput(
-                    source=embed_step.properties.ProcessingOutputConfig.Outputs[
-                        "embed_dataset"
+                    source=quality_step.properties.ProcessingOutputConfig.Outputs[
+                        "quality_dataset"
                     ].S3Output.S3Uri,
                     destination="/opt/ml/processing/input/dataset",
                     input_name="in_dataset",
@@ -269,7 +360,17 @@ def build(config: dict, code_prefix: str, images_uri: str) -> Pipeline:
     )
     eval_step = ProcessingStep(
         name="EvaluateModel",
-        step_args=processor({"IMAGE_SIZE": str(config["training"]["image_size"])}).run(
+        step_args=processor(
+            {
+                "IMAGE_SIZE": str(config["training"]["image_size"]),
+                "DONE_LABEL": str(config["evaluation"].get("done_label", "done")),
+                "NOT_DONE_LABEL": str(config["evaluation"].get("not_done_label", "not_done")),
+                "MIN_SAMPLE_COUNT": str(config["evaluation"].get("min_sample_count", 1)),
+                "MIN_PER_CLASS_COUNT": str(
+                    config["evaluation"].get("min_per_class_count", 1)
+                ),
+            }
+        ).run(
             code=str(STEPS_DIR / "evaluation.py"),
             inputs=[
                 images_input,
@@ -340,6 +441,41 @@ def build(config: dict, code_prefix: str, images_uri: str) -> Pipeline:
                 ),
                 right=config["evaluation"]["latency_budget_ms"],
             ),
+            # Reject vacuous or dataset-shrinking evaluations. The step itself
+            # also exits non-zero in these cases, but we keep the gate conditions
+            # as defense-in-depth against a tampered metrics.json.
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=eval_step.name,
+                    property_file=eval_metrics,
+                    json_path="sample_count",
+                ),
+                right=int(config["evaluation"].get("min_sample_count", 1)),
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=eval_step.name,
+                    property_file=eval_metrics,
+                    json_path="not_done_sample_count",
+                ),
+                right=int(config["evaluation"].get("min_per_class_count", 1)),
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=eval_step.name,
+                    property_file=eval_metrics,
+                    json_path="done_sample_count",
+                ),
+                right=int(config["evaluation"].get("min_per_class_count", 1)),
+            ),
+            ConditionLessThanOrEqualTo(
+                left=JsonGet(
+                    step_name=eval_step.name,
+                    property_file=eval_metrics,
+                    json_path="missing_images",
+                ),
+                right=0,
+            ),
         ],
         if_steps=[register_step],
         else_steps=[FailStep(name="FailEvaluationGate", error_message="Evaluation gate failed.")],
@@ -375,6 +511,35 @@ def build(config: dict, code_prefix: str, images_uri: str) -> Pipeline:
                     json_path="flagged_fraction",
                 ),
                 right=config["cleanlab"]["flag_threshold_fraction"],
+            ),
+            # Reject any report whose detector is not the real CleanLab
+            # detector -- fail closed on silent degradation to the local
+            # heuristic fallback. ``detector`` is emitted by
+            # processing/step3_cleanlab_filter.py alongside
+            # ``flagged_fraction``.
+            ConditionEquals(
+                left=JsonGet(
+                    step_name=quality_step.name,
+                    property_file=quality_metrics,
+                    json_path="detector",
+                ),
+                right="cleanlab",
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=quality_step.name,
+                    property_file=quality_metrics,
+                    json_path="cleaned_count",
+                ),
+                right=sel["target_dataset_min"],
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=quality_step.name,
+                    property_file=quality_metrics,
+                    json_path="minimum_class_count",
+                ),
+                right=sel["min_images_per_class"],
             ),
         ],
         if_steps=[drift_step, drift_gate],
@@ -413,23 +578,93 @@ def build(config: dict, code_prefix: str, images_uri: str) -> Pipeline:
     )
 
     return Pipeline(
-        name=f"miso-food-classifier-{brand_id}",
+        name=pipeline_name or f"miso-food-classifier-{brand_id}",
         steps=[select_step, dataset_gate],
         sagemaker_session=session,
     )
 
 
+def _default_pipeline_name(config: dict[str, Any], relaxed: bool) -> str:
+    brand_id = config["brands"][0]["id"]
+    prefix = SMOKE_PIPELINE_PREFIX if relaxed else PRODUCTION_PIPELINE_PREFIX
+    return f"{prefix}-{brand_id}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="config.smoke.yaml")
+    # --config has no default: a documented command *must* name the config to
+    # prevent silently loading the relaxed smoke overlay and overwriting the
+    # Terraform-managed production pipeline.
+    parser.add_argument("--config", required=True)
     parser.add_argument("--code-prefix", default="code")
-    parser.add_argument("--images-uri", required=True)
+    parser.add_argument(
+        "--images-uri",
+        required=True,
+        help=(
+            "S3 URI of the raw-image prefix for this brand, e.g. "
+            "s3://<raw-archive-bucket>/<brand.id>/. Must be scoped to a "
+            "single brand -- do not pass the bucket root (CWE-639)."
+        ),
+    )
+    parser.add_argument(
+        "--pipeline-name",
+        default=None,
+        help=(
+            "Explicit SageMaker pipeline name. If omitted, production configs "
+            "use 'miso-food-classifier-<brand>' and relaxed/smoke configs use "
+            "'smoke-miso-food-classifier-<brand>' so --upsert cannot overwrite "
+            "the Terraform-managed production pipeline."
+        ),
+    )
+    parser.add_argument(
+        "--i-understand-this-is-a-smoke-config",
+        dest="acknowledge_smoke",
+        action="store_true",
+        help=(
+            "Required acknowledgement when --config points at a relaxed overlay "
+            "whose gate values are weaker than the production floors."
+        ),
+    )
     parser.add_argument("--upsert", action="store_true")
     parser.add_argument("--run", action="store_true")
     args = parser.parse_args()
 
     config = load_config(args.config)
-    pipeline = build(config, args.code_prefix, args.images_uri)
+    weak_fields = _relaxed_fields(config)
+    is_relaxed = bool(weak_fields)
+
+    if is_relaxed and not args.acknowledge_smoke:
+        joined = "\n  - ".join(weak_fields)
+        parser.error(
+            "config has gate values weaker than the production floors:\n  - "
+            f"{joined}\n"
+            "Re-run with --i-understand-this-is-a-smoke-config to confirm "
+            "this is a smoke deployment."
+        )
+
+    pipeline_name = args.pipeline_name or _default_pipeline_name(config, is_relaxed)
+
+    # Belt-and-braces: never let a relaxed/smoke run upsert over a pipeline
+    # name that collides with the production prefix. If the operator passed an
+    # explicit --pipeline-name that still looks like the production name, we
+    # refuse rather than overwrite the Terraform-managed definition.
+    if is_relaxed and args.upsert:
+        brand_id = config["brands"][0]["id"]
+        production_name = f"{PRODUCTION_PIPELINE_PREFIX}-{brand_id}"
+        collides = pipeline_name == production_name or (
+            pipeline_name.startswith(f"{PRODUCTION_PIPELINE_PREFIX}-")
+            and not pipeline_name.startswith(f"{SMOKE_PIPELINE_PREFIX}-")
+        )
+        if collides:
+            parser.error(
+                f"refusing to --upsert a relaxed/smoke config onto pipeline "
+                f"name {pipeline_name!r}: it collides with the production "
+                f"pipeline name prefix {PRODUCTION_PIPELINE_PREFIX!r}. "
+                "Pass --pipeline-name with a distinct name (e.g. prefixed "
+                f"{SMOKE_PIPELINE_PREFIX!r})."
+            )
+
+    pipeline = build(config, args.code_prefix, args.images_uri, pipeline_name=pipeline_name)
     role = config["aws"]["sagemaker_role_arn"]
 
     if args.upsert:

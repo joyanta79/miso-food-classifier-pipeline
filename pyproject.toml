@@ -31,6 +31,7 @@ ignore = ["UP017"]
 "processing/step0_data_selection.py" = ["E402"]
 "processing/step7_register_and_baseline.py" = ["E402"]
 "scripts/sm_clean_runner.py" = ["E402"]
+"scripts/sm_train_runner.py" = ["E402"]
 # These step entrypoints bootstrap-install deps before importing them, so the
 # imports intentionally follow the bootstrap call.
 "pipeline/steps/drift_detection.py" = ["E402"]

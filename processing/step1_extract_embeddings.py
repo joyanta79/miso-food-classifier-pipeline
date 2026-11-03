@@ -110,13 +110,22 @@ def _real_embedding(path: Path, image_size: int, weights: str | None) -> np.ndar
 
 
 def _read_local_payload(record: dict[str, Any], image_root: Path | None) -> bytes:
+    """Return the raw bytes of the record's image, raising if it cannot be opened.
+
+    Fail-closed: never substitute the filename string for image bytes. If the
+    referenced path does not resolve on disk, raise ``FileNotFoundError`` so the
+    caller can either exclude the record or surface the error to the operator.
+    """
     value = record.get("image_path", record.get("key", record["id"]))
     path = Path(str(value))
     if not path.is_absolute() and image_root is not None:
         path = image_root / path
-    if path.exists():
-        return path.read_bytes()
-    return str(value).encode("utf-8")
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Image for record {record.get('id', value)!r} not found at {path!s}; "
+            "refusing to substitute the filename string for image bytes."
+        )
+    return path.read_bytes()
 
 
 def _embed_record(

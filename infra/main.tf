@@ -9,9 +9,13 @@ locals {
     raw-archive        = "${var.bucket_prefix}-raw-archive"
   }
 
-  # The committed definition is a white-castle baseline. Terraform replaces only
-  # the declared brand and registry group while creating each per-brand pipeline.
-  base_pipeline_definition = file("${path.module}/pipeline_definition.json")
+  # Each brand ships its own fully-rendered definition file. Terraform selects
+  # the per-brand definition by filename, so brand-specific tokens such as
+  # BrandNamingPattern are never cloned from a single-brand baseline.
+  per_brand_pipeline_definitions = {
+    for brand_id in keys(local.brands) :
+    brand_id => file("${path.module}/pipeline_definition.${brand_id}.json")
+  }
 }
 
 resource "aws_s3_bucket" "artifacts" {
@@ -83,15 +87,7 @@ resource "aws_sagemaker_pipeline" "brand" {
   pipeline_name         = "${var.pipeline_name_prefix}-${each.key}"
   pipeline_display_name = "${var.pipeline_name_prefix}-${each.key}"
   role_arn              = local.effective_role_arn
-  pipeline_definition = replace(
-    replace(
-      local.base_pipeline_definition,
-      "white-castle",
-      each.key,
-    ),
-    "FoodClassifier-WhiteCastle",
-    each.value.model_package_group,
-  )
+  pipeline_definition   = local.per_brand_pipeline_definitions[each.key]
 
   depends_on = [
     aws_sagemaker_model_package_group.brand,

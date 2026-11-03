@@ -48,6 +48,10 @@ evaluation:
   accuracy_threshold: 0.50        # relaxed from 0.97 (smoke proves the path, not accuracy)
   fp_rate_emergency_threshold: 1.0  # relaxed from 0.05
   latency_budget_ms: 60000        # relaxed from 1000 (CPU inference)
+  done_label: done
+  not_done_label: not_done
+  min_sample_count: 10            # relaxed for 50-image smoke run
+  min_per_class_count: 5
 drift:
   confidence_baseline: 0.85
   level1_confidence_floor: 0.30   # relaxed from 0.65
