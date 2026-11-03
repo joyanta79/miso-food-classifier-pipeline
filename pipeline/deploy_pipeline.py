@@ -287,14 +287,26 @@ def build(
     drift_step = ProcessingStep(
         name="DetectDrift",
         step_args=processor(
-            {"CONFIDENCE_BASELINE": str(config["drift"]["confidence_baseline"])}
+            {
+                "CONFIDENCE_BASELINE": str(config["drift"]["confidence_baseline"]),
+                "LEVEL1_CONFIDENCE_FLOOR": str(config["drift"]["level1_confidence_floor"]),
+                "LEVEL2_CONFIDENCE_THRESHOLD": str(
+                    config["drift"]["level2_confidence_threshold"]
+                ),
+                "CORRECTION_RATE_MULTIPLIER": str(
+                    config["drift"]["correction_rate_multiplier"]
+                ),
+            }
         ).run(
             code=str(STEPS_DIR / "drift_detection.py"),
             inputs=[
                 code_input,
+                # Reads pred_probs.npy persisted by KFoldCleanlabQuality so the
+                # drift step can measure real mean confidence instead of
+                # falling back to the configured baseline.
                 ProcessingInput(
-                    source=embed_step.properties.ProcessingOutputConfig.Outputs[
-                        "embed_dataset"
+                    source=quality_step.properties.ProcessingOutputConfig.Outputs[
+                        "quality_dataset"
                     ].S3Output.S3Uri,
                     destination="/opt/ml/processing/input/dataset",
                     input_name="in_dataset",
