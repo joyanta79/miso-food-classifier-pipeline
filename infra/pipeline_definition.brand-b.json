@@ -23,12 +23,6 @@
       "Type": "String"
     },
     {
-      "DefaultValue": "bb_*",
-      "Description": "Allowed raw-data filename prefix pattern.",
-      "Name": "BrandNamingPattern",
-      "Type": "String"
-    },
-    {
       "DefaultValue": "FoodClassifier-BrandB",
       "Description": "Brand-specific SageMaker Model Registry package group.",
       "Name": "ModelPackageGroup",
@@ -41,39 +35,9 @@
       "Type": "Integer"
     },
     {
-      "DefaultValue": "imagenet",
-      "Description": "Embedding backbone provenance.",
-      "Name": "BackboneSource",
-      "Type": "String"
-    },
-    {
       "DefaultValue": "<replace-with-prior-production-backbone-path>",
       "Description": "Prior-production backbone path used for embeddings.",
       "Name": "BackboneModelPath",
-      "Type": "String"
-    },
-    {
-      "DefaultValue": 1280,
-      "Description": "Embedding vector dimensionality.",
-      "Name": "EmbeddingDim",
-      "Type": "Integer"
-    },
-    {
-      "DefaultValue": 0.99,
-      "Description": "Cosine similarity above which an image is deduplicated.",
-      "Name": "CosineDedupThreshold",
-      "Type": "Float"
-    },
-    {
-      "DefaultValue": 5,
-      "Description": "Number of cross-validation folds.",
-      "Name": "KFoldCount",
-      "Type": "Integer"
-    },
-    {
-      "DefaultValue": "xgboost",
-      "Description": "Classifier implementation used for training.",
-      "Name": "Classifier",
       "Type": "String"
     },
     {
@@ -190,13 +154,9 @@
           "ImageUri": "683313688378.dkr.ecr.us-west-2.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3"
         },
         "Environment": {
-          "BRAND_ID": {
-            "Get": "Parameters.BrandId"
-          },
+          "BRAND_ID": "brand-b",
           "MIN_IMAGES_PER_CLASS": "500",
-          "NAMING_PATTERN": {
-            "Get": "Parameters.BrandNamingPattern"
-          },
+          "NAMING_PATTERN": "bb_*",
           "RECENCY_MONTHS": {
             "Get": "Parameters.RecencyMonths"
           },
@@ -330,15 +290,12 @@
                 "BACKBONE_MODEL_PATH": {
                   "Get": "Parameters.BackboneModelPath"
                 },
-                "BACKBONE_SOURCE": {
-                  "Get": "Parameters.BackboneSource"
-                },
-                "COSINE_DEDUP_THRESHOLD": {
-                  "Get": "Parameters.CosineDedupThreshold"
-                },
-                "EMBEDDING_DIM": {
-                  "Get": "Parameters.EmbeddingDim"
-                },
+                "BACKBONE_SOURCE": "imagenet",
+                "CONFIGURED_BACKBONE_SOURCE": "imagenet",
+                "CONFIGURED_COSINE_DEDUP_THRESHOLD": "0.99",
+                "CONFIGURED_EMBEDDING_DIM": "1280",
+                "COSINE_DEDUP_THRESHOLD": "0.99",
+                "EMBEDDING_DIM": "1280",
                 "SEED": {
                   "Get": "Parameters.Seed"
                 },
@@ -402,13 +359,10 @@
                 "ImageUri": "683313688378.dkr.ecr.us-west-2.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3"
               },
               "Environment": {
-                "CLASSIFIER": {
-                  "Get": "Parameters.Classifier"
-                },
+                "CLASSIFIER": "xgboost",
                 "CLEANLAB_FLAG_THRESHOLD_FRACTION": "0.05",
-                "KFOLD_COUNT": {
-                  "Get": "Parameters.KFoldCount"
-                },
+                "CONFIGURED_CLASSIFIER": "xgboost",
+                "KFOLD_COUNT": "5",
                 "MIN_IMAGES_PER_CLASS": "500",
                 "SEED": {
                   "Get": "Parameters.Seed"
@@ -671,9 +625,7 @@
                             "checkpoint_every_epochs": {
                               "Get": "Parameters.CheckpointEveryEpochs"
                             },
-                            "classifier": {
-                              "Get": "Parameters.Classifier"
-                            },
+                            "classifier": "xgboost",
                             "epochs": {
                               "Get": "Parameters.Epochs"
                             },
@@ -727,9 +679,7 @@
                           "Tags": [
                             {
                               "Key": "brand",
-                              "Value": {
-                                "Get": "Parameters.BrandId"
-                              }
+                              "Value": "brand-b"
                             }
                           ]
                         },
@@ -908,9 +858,7 @@
                             {
                               "Arguments": {
                                 "CustomerMetadataProperties": {
-                                  "brand_id": {
-                                    "Get": "Parameters.BrandId"
-                                  },
+                                  "brand_id": "brand-b",
                                   "ml_lead_topic_arn": {
                                     "Get": "Parameters.MlLeadTopicArn"
                                   },

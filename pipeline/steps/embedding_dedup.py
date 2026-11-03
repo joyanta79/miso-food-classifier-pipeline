@@ -61,6 +61,63 @@ def main() -> None:
     embedding_dim = int(os.environ.get("EMBEDDING_DIM", "1280"))
     cosine = float(os.environ.get("COSINE_DEDUP_THRESHOLD", "0.99"))
     backbone_source = os.environ.get("BACKBONE_SOURCE", "imagenet")
+
+    # The pipeline bakes the configured values as literals into the step
+    # Environment, so a well-formed execution ships identical ``CONFIGURED_*``
+    # entries. We validate against them as a defence-in-depth guard: even if a
+    # future change (or a stray container-level override) re-introduced caller
+    # control over the active value, the step must refuse to run with a knob
+    # that is more permissive than the configured baseline. The previous
+    # ``(0, 1]`` interval alone let a caller push ``COSINE_DEDUP_THRESHOLD``
+    # toward 1.0 and retain every non-identical near-duplicate.
+    configured_cosine_raw = os.environ.get("CONFIGURED_COSINE_DEDUP_THRESHOLD")
+    if configured_cosine_raw is not None:
+        try:
+            configured_cosine = float(configured_cosine_raw)
+        except ValueError as error:
+            raise SystemExit(
+                f"[embedding_dedup] CONFIGURED_COSINE_DEDUP_THRESHOLD must be numeric; "
+                f"got {configured_cosine_raw!r}"
+            ) from error
+        if not 0.0 < configured_cosine <= 1.0:
+            raise SystemExit(
+                "[embedding_dedup] CONFIGURED_COSINE_DEDUP_THRESHOLD must satisfy "
+                f"0 < value <= 1, got {configured_cosine!r}"
+            )
+        # Lower threshold = more aggressive dedup, so ``cosine`` must not exceed
+        # the configured baseline. Raising it would retain more duplicates and
+        # weaken the downstream CleanlabQualityGate floors.
+        if cosine > configured_cosine:
+            raise SystemExit(
+                f"[embedding_dedup] COSINE_DEDUP_THRESHOLD {cosine!r} exceeds configured "
+                f"value {configured_cosine!r}; a per-execution override cannot relax "
+                "near-duplicate removal."
+            )
+
+    configured_dim_raw = os.environ.get("CONFIGURED_EMBEDDING_DIM")
+    if configured_dim_raw is not None:
+        try:
+            configured_dim = int(configured_dim_raw)
+        except ValueError as error:
+            raise SystemExit(
+                f"[embedding_dedup] CONFIGURED_EMBEDDING_DIM must be an integer; "
+                f"got {configured_dim_raw!r}"
+            ) from error
+        if embedding_dim != configured_dim:
+            raise SystemExit(
+                f"[embedding_dedup] EMBEDDING_DIM {embedding_dim!r} does not match "
+                f"configured value {configured_dim!r}; the backbone cannot be swapped "
+                "per execution."
+            )
+
+    configured_backbone = os.environ.get("CONFIGURED_BACKBONE_SOURCE")
+    if configured_backbone is not None and backbone_source != configured_backbone:
+        raise SystemExit(
+            f"[embedding_dedup] BACKBONE_SOURCE {backbone_source!r} does not match "
+            f"configured value {configured_backbone!r}; the backbone provenance "
+            "cannot be swapped per execution."
+        )
+
     # A smoke run uses ImageNet weights; production would point at the prior
     # fine-tuned backbone path. 'imagenet' -> pretrained weights, else deterministic.
     weights = "imagenet" if backbone_source == "imagenet" else None
@@ -91,6 +148,12 @@ def main() -> None:
         "backends": sorted(backend for backend in backends if backend is not None),
         "efficientnet_only": efficientnet_only,
         "allow_deterministic": bool(args.allow_deterministic),
+        # Echo the effective knobs so a reviewer (and any downstream gate) can
+        # see which values actually ran. The pipeline bakes these as literals,
+        # so they should always match the configured baseline.
+        "cosine_dedup_threshold": cosine,
+        "embedding_dim": embedding_dim,
+        "backbone_source": backbone_source,
     }
     (metrics_out / "metrics.json").write_text(
         json.dumps(metrics, indent=2) + "\n", encoding="utf-8"
