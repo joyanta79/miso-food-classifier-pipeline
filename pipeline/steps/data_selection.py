@@ -36,6 +36,7 @@ import argparse
 import fnmatch
 import json
 import os
+import re
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -45,12 +46,29 @@ from typing import Any
 UTC = timezone.utc
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 _WILDCARD_CHARS = frozenset("*?[")
+# Strict allowlist pattern for any label that will later be used as a
+# filesystem directory component (see pipeline/steps/train_step.py). Reject
+# empty labels, ``.``/``..``, and anything containing a separator or NUL byte
+# so that a filename-derived label cannot inject a traversal component.
+_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _is_safe_label(label: str) -> bool:
+    if not isinstance(label, str) or not label:
+        return False
+    if label in (".", "..") or "/" in label or "\\" in label or "\x00" in label:
+        return False
+    return _LABEL_PATTERN.fullmatch(label) is not None
 
 
 def _parse_name(path: Path) -> tuple[str, str, str] | None:
     """Return ``(brand, label, confidence)`` from ``brand_label_confidence.ext``.
 
-    Returns ``None`` when the filename does not match the expected scheme.
+    Returns ``None`` when the filename does not match the expected scheme or
+    when the parsed ``label`` would be unsafe to use as a filesystem path
+    component downstream (``..``, ``/``, NUL, empty, or outside the strict
+    ``^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`` allowlist). This stops a
+    filename-derived traversal label from ever reaching the manifest.
     """
     stem = path.stem
     parts = stem.split("_")
@@ -60,6 +78,8 @@ def _parse_name(path: Path) -> tuple[str, str, str] | None:
     brand = parts[0]
     label = "".join(parts[1:-1])
     confidence = parts[-1]
+    if not _is_safe_label(label):
+        return None
     return brand, label, confidence
 
 
