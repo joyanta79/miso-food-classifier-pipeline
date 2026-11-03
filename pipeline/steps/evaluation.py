@@ -245,6 +245,13 @@ def main() -> None:
         )
 
     images_root = Path(args.images)
+    # Resolve the images channel once; every record's image path must resolve
+    # inside this directory. This mirrors the per-member containment check in
+    # ``_safe_extract_tar`` above and defeats manifest-tampering attempts to
+    # read files outside the images channel (CWE-22). cleaned_dataset.json is
+    # produced by the upstream KFoldCleanlabQuality step into a role-writable
+    # S3 prefix and so must be treated as untrusted.
+    images_root_real = Path(os.path.realpath(images_root))
     correct = 0
     total = 0
     false_positives = 0  # truly not_done predicted as done (hazardous direction)
@@ -253,7 +260,54 @@ def main() -> None:
     missing_images = 0
     latencies: list[float] = []
     for record in cleaned:
-        path = images_root / record["image_path"]
+        rel = record["image_path"]
+        # Reject non-string, absolute, or parent-traversing values before any
+        # filesystem access. These checks match the tar-member validation and
+        # make the containment check that follows a defence-in-depth step.
+        if not isinstance(rel, str) or rel == "":
+            _abort(
+                metrics_out,
+                f"record image_path is not a non-empty string: {rel!r}",
+                {
+                    "classes": labels_sorted,
+                    "sample_count": total,
+                    "not_done_sample_count": not_done_evaluated,
+                    "done_sample_count": done_evaluated,
+                    "missing_images": missing_images,
+                },
+            )
+        if rel.startswith("/") or os.path.isabs(rel) or any(
+            part == ".." for part in rel.replace("\\", "/").split("/")
+        ):
+            _abort(
+                metrics_out,
+                f"record image_path escapes images channel: {rel!r}",
+                {
+                    "classes": labels_sorted,
+                    "sample_count": total,
+                    "not_done_sample_count": not_done_evaluated,
+                    "done_sample_count": done_evaluated,
+                    "missing_images": missing_images,
+                },
+            )
+        # Resolve against the real images root and require containment. Using
+        # realpath on the joined path catches symlinks under images_root that
+        # would otherwise point outside the channel.
+        path = Path(os.path.realpath(images_root_real / rel))
+        if path != images_root_real and not str(path).startswith(
+            str(images_root_real) + os.sep
+        ):
+            _abort(
+                metrics_out,
+                f"record image_path resolves outside images channel: {rel!r}",
+                {
+                    "classes": labels_sorted,
+                    "sample_count": total,
+                    "not_done_sample_count": not_done_evaluated,
+                    "done_sample_count": done_evaluated,
+                    "missing_images": missing_images,
+                },
+            )
         if not path.exists():
             # Count missing files instead of silently dropping records; the step
             # aborts below when missing_images > 0.
