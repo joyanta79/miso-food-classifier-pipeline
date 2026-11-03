@@ -22,6 +22,12 @@ Security contract (CWE-494: Download of Code Without Integrity Check):
       a no-op verification shim. In that mode missing modules raise instead
       of being silently installed.
 
+The import probe accepts an optional "module:attribute" form so the caller
+can require a concrete public symbol (for example
+"cleanlab.filter:find_label_issues") rather than only a top-level package
+name. This closes the silent-degradation window where an install resolves to
+a release whose public API no longer exposes the symbol the step uses.
+
 Python 3.10 compatible.
 """
 
@@ -57,11 +63,26 @@ def _find_lockfile():
     return None
 
 
+def _probe(spec: str) -> None:
+    """Import module or verify module:attribute is accessible.
+
+    Raises ImportError when either the module or the required attribute is
+    missing. Callers treat the raise as "not installed".
+    """
+
+    module_name, _, attribute = spec.partition(":")
+    module = importlib.import_module(module_name)
+    if attribute and not hasattr(module, attribute):
+        raise ImportError(
+            f"module {module_name!r} does not expose required symbol {attribute!r}"
+        )
+
+
 def _missing_modules(packages):
     missing = []
-    for module_name, requirement in packages.items():
+    for spec, requirement in packages.items():
         try:
-            importlib.import_module(module_name)
+            _probe(spec)
         except ImportError:
             missing.append(requirement)
     return missing
@@ -70,8 +91,9 @@ def _missing_modules(packages):
 def ensure(packages):
     """Ensure each importable module exists.
 
-    ``packages`` maps an import name -> pip requirement string, e.g.
-    {"PIL": "pillow", "sklearn": "scikit-learn"}. The ``requirement`` string
+    ``packages`` maps an import spec -> pip requirement string, e.g.
+    {"PIL": "pillow", "cleanlab.filter:find_label_issues": "cleanlab==2.6.4"}.
+    A spec is a bare module name or "<module>:<attribute>". The ``requirement`` string
     is retained only for diagnostic messaging; the actual install uses the
     pinned + hash-locked requirements file described in the module
     docstring. Bare names are never resolved against a remote index.
@@ -105,6 +127,10 @@ def ensure(packages):
         flush=True,
     )
     subprocess.check_call(cmd)
+    # Re-verify every spec after install so a resolve that reports success
+    # but does not actually provide the required symbol still fails closed.
+    for spec in packages:
+        _probe(spec)
 
 
 def _build_pip_argv(lockfile):

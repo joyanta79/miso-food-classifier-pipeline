@@ -777,7 +777,19 @@ def build_dry_run_definition(
                         "KFoldCleanlabQuality", "QualityMetrics", "flagged_fraction"
                     ),
                     "RightValue": config["cleanlab"]["flag_threshold_fraction"],
-                }
+                },
+                # Reject any report whose detector is not the real CleanLab
+                # detector -- fall-closed on silent degradation to the local
+                # heuristic. ``detector`` is emitted by
+                # processing/step3_cleanlab_filter.py alongside
+                # ``flagged_fraction``.
+                {
+                    "Type": "ConditionEquals",
+                    "LeftValue": _step_ref(
+                        "KFoldCleanlabQuality", "QualityMetrics", "detector"
+                    ),
+                    "RightValue": "cleanlab",
+                },
             ],
             "IfSteps": [detect_drift, drift_gate],
             "ElseSteps": [fail_cleanlab],
@@ -1035,7 +1047,8 @@ def _validate_gate_right_values(definition: Mapping[str, Any]) -> None:
     A RightValue that is a ``{"Get": "Parameters.*"}`` reference is caller-overridable
     at StartPipelineExecution time and therefore cannot carry a safety guarantee.
     This check enforces that every gate RightValue is a plain number baked into the
-    definition, and that the number falls within the policy-approved range.
+    definition (or, for ``ConditionEquals``, a literal string), and that numeric
+    thresholds fall within the policy-approved range.
     """
     seen: set[tuple[str, str, str]] = set()
     for step in _walk_steps(definition.get("Steps", [])):
@@ -1057,6 +1070,10 @@ def _validate_gate_right_values(definition: Mapping[str, Any]) -> None:
                     "Safety-critical thresholds must not be caller-overridable pipeline "
                     "parameters."
                 )
+            if condition_type == "ConditionEquals" and isinstance(right_value, str):
+                # Literal string equality (e.g. ``detector == "cleanlab"``) is baked
+                # into the definition and not caller-overridable, so it is allowed.
+                continue
             if isinstance(right_value, bool) or not isinstance(right_value, int | float):
                 raise ValueError(
                     f"Gate {step_name!r} RightValue for {json_path!r} must be a number; "
@@ -1120,6 +1137,7 @@ def build_sagemaker_pipeline(
         from sagemaker.processing import ProcessingInput, ProcessingOutput, ScriptProcessor
         from sagemaker.workflow.condition_step import ConditionStep
         from sagemaker.workflow.conditions import (
+            ConditionEquals,
             ConditionGreaterThanOrEqualTo,
             ConditionLessThanOrEqualTo,
         )
@@ -1342,7 +1360,18 @@ def build_sagemaker_pipeline(
                     json_path="flagged_fraction",
                 ),
                 right=config["cleanlab"]["flag_threshold_fraction"],
-            )
+            ),
+            # Reject any report whose detector is not the real CleanLab
+            # detector -- fail closed on silent degradation to the local
+            # heuristic fallback.
+            ConditionEquals(
+                left=JsonGet(
+                    step_name=quality_step.name,
+                    property_file=quality_report,
+                    json_path="detector",
+                ),
+                right="cleanlab",
+            ),
         ],
         if_steps=[drift_step, drift_gate],
         else_steps=[

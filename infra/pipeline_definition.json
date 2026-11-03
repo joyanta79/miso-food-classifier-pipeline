@@ -484,6 +484,18 @@
                   },
                   "RightValue": 0.05,
                   "Type": "ConditionLessThanOrEqualTo"
+                },
+                {
+                  "LeftValue": {
+                    "Std:JsonGet": {
+                      "Path": "detector",
+                      "PropertyFile": {
+                        "Get": "Steps.KFoldCleanlabQuality.PropertyFiles.QualityMetrics"
+                      }
+                    }
+                  },
+                  "RightValue": "cleanlab",
+                  "Type": "ConditionEquals"
                 }
               ],
               "ElseSteps": [

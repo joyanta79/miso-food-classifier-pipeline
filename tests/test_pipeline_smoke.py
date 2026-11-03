@@ -99,6 +99,8 @@ def test_safety_gate_right_values_are_literal_and_match_config() -> None:
             assert not isinstance(right, dict), (
                 f"Gate {name!r} RightValue must be a literal, not a reference: {right!r}"
             )
+            if condition["Type"] == "ConditionEquals" and isinstance(right, str):
+                continue  # literal string equality, e.g. detector == "cleanlab"
             assert isinstance(right, int | float) and not isinstance(right, bool), (
                 f"Gate {name!r} RightValue must be numeric: {right!r}"
             )
@@ -116,7 +118,10 @@ def test_safety_gate_right_values_are_literal_and_match_config() -> None:
         drift["level1_confidence_floor"],
         drift["correction_rate_multiplier"],
     ]
-    assert _right_values("CleanlabQualityGate") == [cleanlab["flag_threshold_fraction"]]
+    assert _right_values("CleanlabQualityGate") == [
+        cleanlab["flag_threshold_fraction"],
+        "cleanlab",
+    ]
     assert _right_values("DatasetBoundsGate") == [
         selection["target_dataset_min"],
         selection["target_dataset_max"],

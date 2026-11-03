@@ -47,7 +47,7 @@ def main() -> int:
         {
             "sklearn": "scikit-learn",
             "xgboost": "xgboost",
-            "cleanlab": "cleanlab",
+            "cleanlab.filter:find_label_issues": "cleanlab==2.6.4",
             "PIL": "pillow",
         }
     )

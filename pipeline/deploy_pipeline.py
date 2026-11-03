@@ -42,6 +42,7 @@ from sagemaker.model import Model
 from sagemaker.processing import ProcessingInput, ProcessingOutput, ScriptProcessor
 from sagemaker.workflow.condition_step import ConditionStep
 from sagemaker.workflow.conditions import (
+    ConditionEquals,
     ConditionGreaterThanOrEqualTo,
     ConditionLessThanOrEqualTo,
 )
@@ -451,6 +452,19 @@ def build(
                     json_path="flagged_fraction",
                 ),
                 right=config["cleanlab"]["flag_threshold_fraction"],
+            ),
+            # Reject any report whose detector is not the real CleanLab
+            # detector -- fail closed on silent degradation to the local
+            # heuristic fallback. ``detector`` is emitted by
+            # processing/step3_cleanlab_filter.py alongside
+            # ``flagged_fraction``.
+            ConditionEquals(
+                left=JsonGet(
+                    step_name=quality_step.name,
+                    property_file=quality_metrics,
+                    json_path="detector",
+                ),
+                right="cleanlab",
             ),
         ],
         if_steps=[drift_step, drift_gate],
