@@ -662,9 +662,20 @@ def build_dry_run_definition(
             {
                 "InputName": "model-artifacts",
                 "S3Input": {
-                    "S3Uri": _s3_uri(model_artifacts_bucket, brand.id),
+                    # Pin the evaluated artifact to the specific object produced
+                    # by this execution's TrainBrandClassifier step rather than
+                    # mounting the whole brand prefix. This closes the
+                    # arbitrary-code-execution path through
+                    # tf.keras.models.load_model on an attacker-written artifact
+                    # under s3://<model-artifacts-bucket>/<brand>/ (CWE-502):
+                    # S3DataType=S3Object fetches exactly the TrainingJob's
+                    # model.tar.gz, so sibling objects a role writer could place
+                    # alongside it are not downloaded into the container.
+                    "S3Uri": {
+                        "Get": "Steps.TrainBrandClassifier.ModelArtifacts.S3ModelArtifacts"
+                    },
                     "LocalPath": "/opt/ml/processing/input/model",
-                    "S3DataType": "S3Prefix",
+                    "S3DataType": "S3Object",
                     "S3InputMode": "File",
                 },
             }
