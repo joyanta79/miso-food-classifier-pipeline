@@ -59,7 +59,89 @@ def load_config(config_path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]
     if not config["brands"]:
         raise ValueError("config.yaml must define at least one brand")
     _validate_drift_config(config["drift"])
+    _validate_evaluation_config(config["evaluation"])
     return config
+
+
+# Minimum acceptable value for the evaluation sample-count floors. A floor of 1
+# makes an evaluation over one image per class satisfy every gate condition
+# with ``emergency_false_positive_rate = 0.0``; the approved minimum therefore
+# refuses that configuration at definition-build time.
+_MIN_APPROVED_SAMPLE_COUNT_FLOOR = 2
+_MIN_APPROVED_PER_CLASS_COUNT_FLOOR = 2
+
+
+def _validate_evaluation_config(evaluation: Mapping[str, Any]) -> None:
+    """Ensure the evaluation thresholds and anti-vacuous-evaluation floors are
+    present, well-typed and strict enough to be meaningful.
+
+    This mirrors ``_validate_drift_config`` for the evaluation section: the
+    EvaluateModelQualityGate relies on these values both as the step-container
+    floors (via the processing step Environment) and as the gate RightValues,
+    so a missing or vacuous entry would silently reduce the safety floor to 1
+    and let a two-sample evaluation pass. Reject that at definition-build time.
+    """
+    required_probability_keys = (
+        "accuracy_threshold",
+        "fp_rate_emergency_threshold",
+    )
+    for key in required_probability_keys:
+        if key not in evaluation:
+            raise ValueError(f"config.yaml evaluation section missing {key!r}")
+        try:
+            value = float(evaluation[key])
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"evaluation.{key} must be numeric, got {evaluation[key]!r}"
+            ) from error
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"evaluation.{key} must be in [0, 1], got {value!r}")
+
+    if "latency_budget_ms" not in evaluation:
+        raise ValueError("config.yaml evaluation section missing 'latency_budget_ms'")
+    try:
+        latency = float(evaluation["latency_budget_ms"])
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"evaluation.latency_budget_ms must be numeric, got "
+            f"{evaluation['latency_budget_ms']!r}"
+        ) from error
+    if not latency > 0.0:
+        raise ValueError(
+            f"evaluation.latency_budget_ms must be a positive number, got {latency!r}"
+        )
+
+    required_count_keys = (
+        ("min_sample_count", _MIN_APPROVED_SAMPLE_COUNT_FLOOR),
+        ("min_per_class_count", _MIN_APPROVED_PER_CLASS_COUNT_FLOOR),
+    )
+    for key, approved_minimum in required_count_keys:
+        if key not in evaluation:
+            raise ValueError(f"config.yaml evaluation section missing {key!r}")
+        raw = evaluation[key]
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise ValueError(
+                f"evaluation.{key} must be an integer, got {raw!r} (type {type(raw).__name__})"
+            )
+        if raw < approved_minimum:
+            raise ValueError(
+                f"evaluation.{key} must be an integer >= {approved_minimum} to prevent a "
+                f"vacuous evaluation from satisfying the release gate, got {raw!r}"
+            )
+
+    for key in ("done_label", "not_done_label"):
+        if key not in evaluation:
+            raise ValueError(f"config.yaml evaluation section missing {key!r}")
+        label = evaluation[key]
+        if not isinstance(label, str) or not label:
+            raise ValueError(
+                f"evaluation.{key} must be a non-empty string, got {label!r}"
+            )
+    if evaluation["done_label"] == evaluation["not_done_label"]:
+        raise ValueError(
+            "evaluation.done_label and evaluation.not_done_label must differ; the "
+            "hazardous false-positive direction cannot be measured otherwise."
+        )
 
 
 def _validate_drift_config(drift: Mapping[str, Any]) -> None:
@@ -694,15 +776,15 @@ def build_dry_run_definition(
             ),
             # Labels and sample-count floors feeding the emergency-FP metric and the
             # EvaluateModelQualityGate are safety-critical too; inject as literals.
-            "DONE_LABEL": _literal_env_value(config["evaluation"].get("done_label", "done")),
+            "DONE_LABEL": _literal_env_value(config["evaluation"]["done_label"]),
             "NOT_DONE_LABEL": _literal_env_value(
-                config["evaluation"].get("not_done_label", "not_done")
+                config["evaluation"]["not_done_label"]
             ),
             "MIN_SAMPLE_COUNT": _literal_env_value(
-                int(config["evaluation"].get("min_sample_count", 1))
+                int(config["evaluation"]["min_sample_count"])
             ),
             "MIN_PER_CLASS_COUNT": _literal_env_value(
-                int(config["evaluation"].get("min_per_class_count", 1))
+                int(config["evaluation"]["min_per_class_count"])
             ),
         },
         [
@@ -814,21 +896,21 @@ def build_dry_run_definition(
                     "LeftValue": _step_ref(
                         "EvaluateModel", "EvaluationMetrics", "sample_count"
                     ),
-                    "RightValue": int(config["evaluation"].get("min_sample_count", 1)),
+                    "RightValue": int(config["evaluation"]["min_sample_count"]),
                 },
                 {
                     "Type": "ConditionGreaterThanOrEqualTo",
                     "LeftValue": _step_ref(
                         "EvaluateModel", "EvaluationMetrics", "not_done_sample_count"
                     ),
-                    "RightValue": int(config["evaluation"].get("min_per_class_count", 1)),
+                    "RightValue": int(config["evaluation"]["min_per_class_count"]),
                 },
                 {
                     "Type": "ConditionGreaterThanOrEqualTo",
                     "LeftValue": _step_ref(
                         "EvaluateModel", "EvaluationMetrics", "done_sample_count"
                     ),
-                    "RightValue": int(config["evaluation"].get("min_per_class_count", 1)),
+                    "RightValue": int(config["evaluation"]["min_per_class_count"]),
                 },
                 {
                     "Type": "ConditionLessThanOrEqualTo",
@@ -1183,6 +1265,34 @@ _GATE_RIGHT_VALUE_POLICY: dict[tuple[str, str, str], tuple[float, float]] = {
         "ConditionLessThanOrEqualTo",
     ): (0.0, 0.10),
     ("EvaluateModelQualityGate", "latency_ms", "ConditionLessThanOrEqualTo"): (1.0, 5_000.0),
+    # Anti-vacuous-evaluation floors. These are the gate thresholds that stop a
+    # dataset-shrinking manipulation from satisfying the gate with a one-image
+    # evaluation (emergency_false_positive_rate = 0/1 = 0.0). The approved
+    # minimums match ``_validate_evaluation_config`` so a config that omits
+    # these keys fails at load_config, and a config that smuggles 1 past the
+    # section validator still fails here.
+    (
+        "EvaluateModelQualityGate",
+        "sample_count",
+        "ConditionGreaterThanOrEqualTo",
+    ): (float(_MIN_APPROVED_SAMPLE_COUNT_FLOOR), 1_000_000.0),
+    (
+        "EvaluateModelQualityGate",
+        "not_done_sample_count",
+        "ConditionGreaterThanOrEqualTo",
+    ): (float(_MIN_APPROVED_PER_CLASS_COUNT_FLOOR), 1_000_000.0),
+    (
+        "EvaluateModelQualityGate",
+        "done_sample_count",
+        "ConditionGreaterThanOrEqualTo",
+    ): (float(_MIN_APPROVED_PER_CLASS_COUNT_FLOOR), 1_000_000.0),
+    # ``missing_images`` is a hardcoded literal 0 in the definition builders;
+    # pin the policy to exactly 0 so a drift to any other value is rejected.
+    (
+        "EvaluateModelQualityGate",
+        "missing_images",
+        "ConditionLessThanOrEqualTo",
+    ): (0.0, 0.0),
     ("DriftGate", "confidence", "ConditionGreaterThanOrEqualTo"): (0.50, 1.0),
     ("DriftGate", "correction_rate_multiplier", "ConditionLessThanOrEqualTo"): (1.0, 10.0),
     ("CleanlabQualityGate", "flagged_fraction", "ConditionLessThanOrEqualTo"): (0.0, 0.10),
@@ -1492,7 +1602,7 @@ def build_sagemaker_pipeline(
                     property_file=evaluation_report,
                     json_path="sample_count",
                 ),
-                right=int(evaluation.get("min_sample_count", 1)),
+                right=int(evaluation["min_sample_count"]),
             ),
             ConditionGreaterThanOrEqualTo(
                 left=JsonGet(
@@ -1500,7 +1610,7 @@ def build_sagemaker_pipeline(
                     property_file=evaluation_report,
                     json_path="not_done_sample_count",
                 ),
-                right=int(evaluation.get("min_per_class_count", 1)),
+                right=int(evaluation["min_per_class_count"]),
             ),
             ConditionGreaterThanOrEqualTo(
                 left=JsonGet(
@@ -1508,7 +1618,7 @@ def build_sagemaker_pipeline(
                     property_file=evaluation_report,
                     json_path="done_sample_count",
                 ),
-                right=int(evaluation.get("min_per_class_count", 1)),
+                right=int(evaluation["min_per_class_count"]),
             ),
             ConditionLessThanOrEqualTo(
                 left=JsonGet(

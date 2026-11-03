@@ -142,13 +142,54 @@ def _abort(metrics_out: Path, reason: str, extra: dict) -> None:
     sys.exit(1)
 
 
-def _positive_int(value, default: int) -> int:
-    if value is None or value == "":
-        return default
+# Default location of the metrics output directory, matching the argparse
+# ``--metrics-out`` default. Used by ``_require_positive_int_env`` which runs
+# at argparse-default construction time, before CLI parsing, so it does not
+# yet have access to ``args.metrics_out``.
+_DEFAULT_METRICS_OUT = Path("/opt/ml/processing/output/metrics")
+
+
+def _require_positive_int_env(env_name: str) -> int:
+    """Return ``os.environ[env_name]`` parsed as a positive int, or fail closed.
+
+    The sample-count floors are a safety control against a vacuous or shrunken
+    evaluation (see module docstring). A missing, non-numeric, zero or negative
+    value must therefore abort the step rather than silently substituting a
+    permissive default like 1, which would let a one-sample-per-class run
+    satisfy every gate condition.
+    """
+    raw = os.environ.get(env_name)
+    if raw is None or raw == "":
+        _abort(
+            _DEFAULT_METRICS_OUT,
+            (
+                f"required environment variable {env_name!r} is not set; the "
+                f"evaluation step refuses to fall back to a permissive default."
+            ),
+            {},
+        )
     try:
-        return int(value)
+        parsed = int(raw)
     except (TypeError, ValueError):
-        return default
+        _abort(
+            _DEFAULT_METRICS_OUT,
+            (
+                f"environment variable {env_name!r}={raw!r} is not a valid integer; "
+                f"the evaluation step refuses to fall back to a permissive default."
+            ),
+            {},
+        )
+        return 0  # unreachable; _abort calls sys.exit
+    if parsed < 1:
+        _abort(
+            _DEFAULT_METRICS_OUT,
+            (
+                f"environment variable {env_name!r}={raw!r} must be a positive integer "
+                f"(>=1); the evaluation step refuses to fall back to a permissive default."
+            ),
+            {},
+        )
+    return parsed
 
 
 def _load_model(model_dir: Path):
@@ -187,13 +228,13 @@ def main() -> None:
     parser.add_argument(
         "--min-sample-count",
         type=int,
-        default=_positive_int(os.environ.get("MIN_SAMPLE_COUNT"), 1),
+        default=_require_positive_int_env("MIN_SAMPLE_COUNT"),
         help="Minimum evaluated samples; below this the step fails closed.",
     )
     parser.add_argument(
         "--min-per-class-count",
         type=int,
-        default=_positive_int(os.environ.get("MIN_PER_CLASS_COUNT"), 1),
+        default=_require_positive_int_env("MIN_PER_CLASS_COUNT"),
         help="Minimum evaluated samples per labelled class; below this the step fails closed.",
     )
     args = parser.parse_args()
