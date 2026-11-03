@@ -57,25 +57,92 @@ from sagemaker.workflow.steps import ProcessingStep, TrainingStep
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STEPS_DIR = PROJECT_ROOT / "pipeline" / "steps"
 
-# Production safety floors. ``load_config`` already enforces structure via
-# ``pipeline.load_config``; this table enforces the *values*: a config is
-# considered "relaxed" (smoke-only) when any field here is weaker than its
-# production floor from config.yaml. ``op`` is the direction a value must
-# satisfy to be at-least-as-strict-as-production.
-#   "ge": production value is a minimum (config value must be >= floor)
-#   "le": production value is a maximum (config value must be <= floor)
-PRODUCTION_GATE_FLOORS: tuple[tuple[str, str, float, str], ...] = (
-    ("data_selection", "min_images_per_class", 500, "ge"),
-    ("data_selection", "target_dataset_min", 6000, "ge"),
-    ("cleanlab", "flag_threshold_fraction", 0.05, "le"),
-    ("evaluation", "accuracy_threshold", 0.97, "ge"),
-    ("evaluation", "fp_rate_emergency_threshold", 0.05, "le"),
-    ("evaluation", "latency_budget_ms", 1000, "le"),
-    ("drift", "level1_confidence_floor", 0.65, "ge"),
+# Production safety floors are DERIVED from ``config.yaml`` at the repo root --
+# the file Terraform consumes -- rather than being duplicated in a hard-coded
+# table that can drift. The shared ``load_config`` already enforces structure
+# and types; this list only declares which fields are safety-critical and
+# which direction (``ge``/``le``) a config value must satisfy to be
+# at-least-as-strict-as-production.
+#   "ge": production value is a minimum (deploy value must be >= production)
+#   "le": production value is a maximum (deploy value must be <= production)
+#
+# Every field here must be present and numeric in both the production config
+# and the deploy config -- a missing or non-numeric field is a HARD ERROR (not
+# a silent 'not relaxed'), so an attacker cannot bypass the guard by deleting
+# the field or writing a list literal in its place.
+_PRODUCTION_GATE_FLOOR_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("data_selection", "min_images_per_class", "ge"),
+    ("data_selection", "target_dataset_min", "ge"),
+    ("data_selection", "target_dataset_max", "le"),
+    ("cleanlab", "flag_threshold_fraction", "le"),
+    ("evaluation", "accuracy_threshold", "ge"),
+    ("evaluation", "fp_rate_emergency_threshold", "le"),
+    ("evaluation", "latency_budget_ms", "le"),
+    ("evaluation", "min_sample_count", "ge"),
+    ("evaluation", "min_per_class_count", "ge"),
+    ("drift", "level1_confidence_floor", "ge"),
+    ("drift", "level2_confidence_threshold", "ge"),
+    ("drift", "correction_rate_multiplier", "le"),
+)
+
+# Label-pair fields: deploy must declare the SAME label-to-class binding as the
+# production config so ``emergency_false_positive_rate`` continues to measure
+# the dangerous direction. Swapping ``done_label``/``not_done_label`` would
+# make the gate measure the harmless direction.
+_PRODUCTION_LABEL_FIELDS: tuple[tuple[str, str], ...] = (
+    ("evaluation", "done_label"),
+    ("evaluation", "not_done_label"),
 )
 
 PRODUCTION_PIPELINE_PREFIX = "miso-food-classifier"
 SMOKE_PIPELINE_PREFIX = "smoke-miso-food-classifier"
+
+
+def _production_config() -> dict[str, Any]:
+    """Load the repository's production ``config.yaml`` as the floor source.
+
+    Floors are not duplicated in this module -- they come from the same file
+    Terraform renders into ``infra/pipeline_definition.<brand>.json``.
+    """
+    from pipeline.pipeline import DEFAULT_CONFIG_PATH  # noqa: WPS433
+    from pipeline.pipeline import load_config as _shared_load_config  # noqa: WPS433
+
+    return _shared_load_config(DEFAULT_CONFIG_PATH)
+
+
+def _require_section_value(
+    source: str, config: dict[str, Any], section: str, key: str
+) -> Any:
+    """Return a required key from ``config[section]`` or raise ``ValueError``."""
+    section_cfg = config.get(section)
+    if not isinstance(section_cfg, dict) or key not in section_cfg:
+        raise ValueError(
+            f"{source} is missing required field {section}.{key!r} "
+            "used by the production safety gate"
+        )
+    return section_cfg[key]
+
+
+def _coerce_numeric(source: str, section: str, key: str, value: Any) -> float:
+    if isinstance(value, bool):
+        raise ValueError(
+            f"{source} {section}.{key} must be numeric, got {value!r}"
+        )
+    try:
+        return float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"{source} {section}.{key} must be numeric, got {value!r}"
+        ) from error
+
+
+def _coerce_label(source: str, section: str, key: str, value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{source} {section}.{key} must be a non-empty string label, got "
+            f"{value!r}"
+        )
+    return value
 
 
 def load_config(path: str) -> dict[str, Any]:
@@ -93,21 +160,45 @@ def load_config(path: str) -> dict[str, Any]:
 
 
 def _relaxed_fields(config: dict[str, Any]) -> list[str]:
-    """Return the list of fields whose values are weaker than the production floor."""
+    """Return the list of fields whose values are weaker than the production floor.
+
+    Floors are derived from the repository's production ``config.yaml`` -- there
+    is no duplicated hard-coded table that could lag the real production
+    thresholds. Missing or non-numeric gate fields in either the production
+    config or the deploy config are a HARD ERROR (``ValueError``); they are
+    never silently treated as 'not relaxed'.
+    """
+    production = _production_config()
     weak: list[str] = []
-    for section, key, floor, op in PRODUCTION_GATE_FLOORS:
-        section_cfg = config.get(section) or {}
-        if key not in section_cfg:
-            continue
-        value = section_cfg[key]
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            continue
-        if op == "ge" and numeric < float(floor):
-            weak.append(f"{section}.{key}={value} < production floor {floor}")
-        elif op == "le" and numeric > float(floor):
-            weak.append(f"{section}.{key}={value} > production floor {floor}")
+    for section, key, op in _PRODUCTION_GATE_FLOOR_FIELDS:
+        floor_raw = _require_section_value(
+            "production config.yaml", production, section, key
+        )
+        value_raw = _require_section_value("deploy config", config, section, key)
+        floor = _coerce_numeric("production config.yaml", section, key, floor_raw)
+        value = _coerce_numeric("deploy config", section, key, value_raw)
+        if op == "ge" and value < floor:
+            weak.append(f"{section}.{key}={value_raw} < production floor {floor_raw}")
+        elif op == "le" and value > floor:
+            weak.append(f"{section}.{key}={value_raw} > production floor {floor_raw}")
+    for section, key in _PRODUCTION_LABEL_FIELDS:
+        production_label = _coerce_label(
+            "production config.yaml",
+            section,
+            key,
+            _require_section_value("production config.yaml", production, section, key),
+        )
+        deploy_label = _coerce_label(
+            "deploy config",
+            section,
+            key,
+            _require_section_value("deploy config", config, section, key),
+        )
+        if deploy_label != production_label:
+            weak.append(
+                f"{section}.{key}={deploy_label!r} != production value "
+                f"{production_label!r}"
+            )
     return weak
 
 
@@ -363,11 +454,11 @@ def build(
         step_args=processor(
             {
                 "IMAGE_SIZE": str(config["training"]["image_size"]),
-                "DONE_LABEL": str(config["evaluation"].get("done_label", "done")),
-                "NOT_DONE_LABEL": str(config["evaluation"].get("not_done_label", "not_done")),
-                "MIN_SAMPLE_COUNT": str(config["evaluation"].get("min_sample_count", 1)),
+                "DONE_LABEL": str(config["evaluation"]["done_label"]),
+                "NOT_DONE_LABEL": str(config["evaluation"]["not_done_label"]),
+                "MIN_SAMPLE_COUNT": str(config["evaluation"]["min_sample_count"]),
                 "MIN_PER_CLASS_COUNT": str(
-                    config["evaluation"].get("min_per_class_count", 1)
+                    config["evaluation"]["min_per_class_count"]
                 ),
             }
         ).run(
@@ -450,7 +541,7 @@ def build(
                     property_file=eval_metrics,
                     json_path="sample_count",
                 ),
-                right=int(config["evaluation"].get("min_sample_count", 1)),
+                right=int(config["evaluation"]["min_sample_count"]),
             ),
             ConditionGreaterThanOrEqualTo(
                 left=JsonGet(
@@ -458,7 +549,7 @@ def build(
                     property_file=eval_metrics,
                     json_path="not_done_sample_count",
                 ),
-                right=int(config["evaluation"].get("min_per_class_count", 1)),
+                right=int(config["evaluation"]["min_per_class_count"]),
             ),
             ConditionGreaterThanOrEqualTo(
                 left=JsonGet(
@@ -466,7 +557,7 @@ def build(
                     property_file=eval_metrics,
                     json_path="done_sample_count",
                 ),
-                right=int(config["evaluation"].get("min_per_class_count", 1)),
+                right=int(config["evaluation"]["min_per_class_count"]),
             ),
             ConditionLessThanOrEqualTo(
                 left=JsonGet(
@@ -644,30 +735,46 @@ def main() -> None:
 
     pipeline_name = args.pipeline_name or _default_pipeline_name(config, is_relaxed)
 
-    # Belt-and-braces: never let a relaxed/smoke run upsert over a pipeline
-    # name that collides with the production prefix. If the operator passed an
-    # explicit --pipeline-name that still looks like the production name, we
-    # refuse rather than overwrite the Terraform-managed definition.
-    if is_relaxed and args.upsert:
+    # Belt-and-braces: never let --upsert overwrite a Terraform-managed
+    # production pipeline, regardless of whether the deploy config looks
+    # relaxed. The guard runs UNCONDITIONALLY -- a config that silently
+    # weakens an uncovered field (or an operator who thinks they are
+    # re-applying production) must still fail closed, because the production
+    # pipeline definition is owned by Terraform (infra/main.tf consumes
+    # infra/pipeline_definition.<brand>.json) and this script is only meant
+    # for the smoke overlay. ``PRODUCTION_PIPELINE_PREFIX`` is a safe
+    # over-approximation of the Terraform ``pipeline_name_prefix`` variable
+    # (infra/variables.tf); operators who have reassigned that variable must
+    # pass ``--pipeline-name`` with a prefix that does not collide.
+    if args.upsert:
         brand_id = config["brands"][0]["id"]
         production_name = f"{PRODUCTION_PIPELINE_PREFIX}-{brand_id}"
-        collides = pipeline_name == production_name or (
+        collides_with_production = pipeline_name == production_name or (
             pipeline_name.startswith(f"{PRODUCTION_PIPELINE_PREFIX}-")
             and not pipeline_name.startswith(f"{SMOKE_PIPELINE_PREFIX}-")
         )
-        if collides:
+        if collides_with_production:
             parser.error(
-                f"refusing to --upsert a relaxed/smoke config onto pipeline "
-                f"name {pipeline_name!r}: it collides with the production "
-                f"pipeline name prefix {PRODUCTION_PIPELINE_PREFIX!r}. "
-                "Pass --pipeline-name with a distinct name (e.g. prefixed "
-                f"{SMOKE_PIPELINE_PREFIX!r})."
+                f"refusing to --upsert pipeline name {pipeline_name!r}: it "
+                f"collides with the Terraform-managed production pipeline "
+                f"prefix {PRODUCTION_PIPELINE_PREFIX!r}. The production "
+                "definition is owned by Terraform (infra/main.tf consumes "
+                "infra/pipeline_definition.<brand>.json). Pass --pipeline-name "
+                f"with a distinct name (e.g. prefixed {SMOKE_PIPELINE_PREFIX!r})."
             )
 
     pipeline = build(config, args.code_prefix, args.images_uri, pipeline_name=pipeline_name)
     role = config["aws"]["sagemaker_role_arn"]
 
     if args.upsert:
+        # Final safety net: run the shared SDK-definition validator over the
+        # built pipeline before upserting. This mirrors the Terraform export
+        # path (``pipeline/export_definition.py``) and catches an SDK builder
+        # that silently drops a safety-gate Condition, duplicates a step, or
+        # changes the model-registration approval status.
+        from pipeline.pipeline import validate_sdk_pipeline_definition  # noqa: WPS433
+
+        validate_sdk_pipeline_definition(pipeline.definition())
         pipeline.upsert(role_arn=role)
         print(f"[deploy] upserted pipeline: {pipeline.name}")
     if args.run:
