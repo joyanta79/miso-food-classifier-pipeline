@@ -59,7 +59,100 @@ def load_config(config_path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]
     if not config["brands"]:
         raise ValueError("config.yaml must define at least one brand")
     _validate_drift_config(config["drift"])
+    _validate_data_selection_config(config["data_selection"])
+    _validate_evaluation_config(config["evaluation"])
     return config
+
+
+def _require_numeric(section_name: str, section: Mapping[str, Any], key: str) -> float:
+    """Return ``section[key]`` as ``float``, raising on missing or non-numeric values.
+
+    This is the shared contract for every gate RightValue the deploy guard and
+    the SDK pipeline builder read from ``config.yaml``. A missing or
+    non-numeric field is a hard error, not a silently-accepted default -- the
+    deploy-time safety guard inspects these fields to decide whether a config
+    weakens a production floor, and a tolerant default would make the weaker
+    value invisible to the check.
+    """
+    if key not in section:
+        raise ValueError(f"config.yaml {section_name} section missing {key!r}")
+    value = section[key]
+    if isinstance(value, bool):
+        raise ValueError(
+            f"{section_name}.{key} must be numeric, got {value!r}"
+        )
+    try:
+        return float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"{section_name}.{key} must be numeric, got {value!r}"
+        ) from error
+
+
+def _require_label(section_name: str, section: Mapping[str, Any], key: str) -> str:
+    """Return ``section[key]`` as a non-empty string label."""
+    if key not in section:
+        raise ValueError(f"config.yaml {section_name} section missing {key!r}")
+    value = section[key]
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{section_name}.{key} must be a non-empty string label, got {value!r}"
+        )
+    return value
+
+
+def _validate_data_selection_config(data_selection: Mapping[str, Any]) -> None:
+    """Require the numeric data-selection fields the dataset gates read.
+
+    ``min_images_per_class``, ``target_dataset_min`` and ``target_dataset_max``
+    all feed Condition RightValues; any missing or non-numeric field is a hard
+    error so the deploy guard can derive production floors from this section.
+    """
+    required_numeric = (
+        "min_images_per_class",
+        "target_dataset_min",
+        "target_dataset_max",
+    )
+    values: dict[str, float] = {}
+    for key in required_numeric:
+        values[key] = _require_numeric("data_selection", data_selection, key)
+    if values["target_dataset_max"] < values["target_dataset_min"]:
+        raise ValueError(
+            "data_selection.target_dataset_max must be >= data_selection.target_dataset_min"
+        )
+    if values["min_images_per_class"] <= 0:
+        raise ValueError(
+            "data_selection.min_images_per_class must be a positive number, got "
+            f"{values['min_images_per_class']!r}"
+        )
+
+
+def _validate_evaluation_config(evaluation: Mapping[str, Any]) -> None:
+    """Require the numeric and label evaluation fields the quality gate reads.
+
+    ``accuracy_threshold``, ``fp_rate_emergency_threshold``, ``latency_budget_ms``,
+    ``min_sample_count`` and ``min_per_class_count`` all feed Condition
+    RightValues, and ``done_label`` / ``not_done_label`` are passed into the
+    evaluation container as the labels against which
+    ``emergency_false_positive_rate`` is measured. A silent default would
+    disguise a weakened or label-swapped config from the deploy guard, so
+    every one is required here.
+    """
+    for key in (
+        "accuracy_threshold",
+        "fp_rate_emergency_threshold",
+        "latency_budget_ms",
+        "min_sample_count",
+        "min_per_class_count",
+    ):
+        _require_numeric("evaluation", evaluation, key)
+    done = _require_label("evaluation", evaluation, "done_label")
+    not_done = _require_label("evaluation", evaluation, "not_done_label")
+    if done == not_done:
+        raise ValueError(
+            "evaluation.done_label and evaluation.not_done_label must differ, "
+            f"got both equal to {done!r}"
+        )
 
 
 def _validate_drift_config(drift: Mapping[str, Any]) -> None:
