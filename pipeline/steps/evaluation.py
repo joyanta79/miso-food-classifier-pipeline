@@ -151,19 +151,40 @@ def _positive_int(value, default: int) -> int:
         return default
 
 
+# Only this exact filename is accepted as the model artifact. train.py writes
+# ``model.keras`` to SM_MODEL_DIR and nothing else, so SavedModel directories,
+# legacy HDF5 files and alternate filenames (which are documented
+# arbitrary-code-execution sinks under tf.keras.models.load_model on
+# TensorFlow/Keras 2.14) are rejected here before deserialization.
+_EXPECTED_MODEL_FILENAME = "model.keras"
+
+
 def _load_model(model_dir: Path):
     import tensorflow as tf
 
-    # train.py saves either a SavedModel dir or model.keras; find it.
-    for candidate in ("model.keras", "1", "model"):
-        p = model_dir / candidate
-        if p.exists():
-            return tf.keras.models.load_model(p)
-    # Fall back: first loadable entry.
-    for p in sorted(model_dir.rglob("*")):
-        if p.name.endswith(".keras") or (p.is_dir() and (p / "saved_model.pb").exists()):
-            return tf.keras.models.load_model(p)
-    raise FileNotFoundError(f"No loadable model found under {model_dir}")
+    # Accept only the exact expected filename at the mount root. Reject
+    # SavedModel directories, legacy HDF5 artifacts, and any discovered
+    # ``*.keras`` sibling: on TensorFlow/Keras 2.14 all of these revive
+    # attacker-controlled code (legacy HDF5 Lambda layers are restored with
+    # marshal.loads; SavedModel restores arbitrary graphs; even a .keras v3
+    # archive is parsed with safe_mode disabled by default).
+    p = model_dir / _EXPECTED_MODEL_FILENAME
+    if not p.exists():
+        raise FileNotFoundError(
+            f"Expected model artifact {_EXPECTED_MODEL_FILENAME!r} not found "
+            f"under {model_dir}; refusing to load."
+        )
+    if not p.is_file():
+        raise ValueError(
+            f"{_EXPECTED_MODEL_FILENAME!r} must be a regular file; refusing to "
+            f"load (SavedModel directories are not accepted)."
+        )
+    # safe_mode=True refuses lambdas and arbitrary callables; compile=False
+    # skips loss/optimizer deserialization paths; the empty custom_objects
+    # allowlist disables import-by-name resolution of attacker-named modules.
+    return tf.keras.models.load_model(
+        p, safe_mode=True, compile=False, custom_objects={}
+    )
 
 
 def main() -> None:

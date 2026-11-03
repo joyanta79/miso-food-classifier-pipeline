@@ -759,9 +759,11 @@
                               "InputName": "model-artifacts",
                               "S3Input": {
                                 "LocalPath": "/opt/ml/processing/input/model",
-                                "S3DataType": "S3Prefix",
+                                "S3DataType": "S3Object",
                                 "S3InputMode": "File",
-                                "S3Uri": "s3://<replace-model-artifacts-bucket>/brand-e"
+                                "S3Uri": {
+                                  "Get": "Steps.TrainBrandClassifier.ModelArtifacts.S3ModelArtifacts"
+                                }
                               }
                             },
                             {
