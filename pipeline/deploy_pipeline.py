@@ -19,15 +19,23 @@ Every step is its own SageMaker job. Thresholds come from a config file
 the manual-approval gate).
 
 Usage:
-    python pipeline/deploy_pipeline.py --config config.smoke.yaml --upsert --run
+    # Production deployment:
+    python pipeline/deploy_pipeline.py --config config.yaml --images-uri s3://... --upsert
+
+    # Smoke run (relaxed overlay) — a smoke pipeline name and an explicit
+    # acknowledgement are required so --upsert cannot overwrite the
+    # Terraform-managed production pipeline:
+    python pipeline/deploy_pipeline.py --config config.smoke.yaml \\
+        --images-uri s3://... --upsert --run \\
+        --i-understand-this-is-a-smoke-config
 """
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
-import yaml
 from sagemaker.estimator import Estimator
 from sagemaker.image_uris import retrieve
 from sagemaker.model import Model
@@ -48,18 +56,77 @@ from sagemaker.workflow.steps import ProcessingStep, TrainingStep
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STEPS_DIR = PROJECT_ROOT / "pipeline" / "steps"
 
+# Production safety floors. ``load_config`` already enforces structure via
+# ``pipeline.load_config``; this table enforces the *values*: a config is
+# considered "relaxed" (smoke-only) when any field here is weaker than its
+# production floor from config.yaml. ``op`` is the direction a value must
+# satisfy to be at-least-as-strict-as-production.
+#   "ge": production value is a minimum (config value must be >= floor)
+#   "le": production value is a maximum (config value must be <= floor)
+PRODUCTION_GATE_FLOORS: tuple[tuple[str, str, float, str], ...] = (
+    ("data_selection", "min_images_per_class", 500, "ge"),
+    ("data_selection", "target_dataset_min", 6000, "ge"),
+    ("cleanlab", "flag_threshold_fraction", 0.05, "le"),
+    ("evaluation", "accuracy_threshold", 0.97, "ge"),
+    ("evaluation", "fp_rate_emergency_threshold", 0.05, "le"),
+    ("evaluation", "latency_budget_ms", 1000, "le"),
+    ("drift", "level1_confidence_floor", 0.65, "ge"),
+)
 
-def load_config(path: str) -> dict:
-    return yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+PRODUCTION_PIPELINE_PREFIX = "miso-food-classifier"
+SMOKE_PIPELINE_PREFIX = "smoke-miso-food-classifier"
 
 
-def build(config: dict, code_prefix: str, images_uri: str) -> Pipeline:
+def load_config(path: str) -> dict[str, Any]:
+    """Load the deploy configuration using the shared validator.
+
+    Delegates to :func:`pipeline.pipeline.load_config` so that required sections
+    and the brand list are validated before anything is deployed. The import is
+    performed lazily to keep this module importable without the shared package
+    being on ``sys.path`` at module import time (the script runs from the repo
+    root).
+    """
+    from pipeline.pipeline import load_config as _shared_load_config  # noqa: WPS433
+
+    return _shared_load_config(path)
+
+
+def _relaxed_fields(config: dict[str, Any]) -> list[str]:
+    """Return the list of fields whose values are weaker than the production floor."""
+    weak: list[str] = []
+    for section, key, floor, op in PRODUCTION_GATE_FLOORS:
+        section_cfg = config.get(section) or {}
+        if key not in section_cfg:
+            continue
+        value = section_cfg[key]
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if op == "ge" and numeric < float(floor):
+            weak.append(f"{section}.{key}={value} < production floor {floor}")
+        elif op == "le" and numeric > float(floor):
+            weak.append(f"{section}.{key}={value} > production floor {floor}")
+    return weak
+
+
+def build(
+    config: dict,
+    code_prefix: str,
+    images_uri: str,
+    pipeline_name: str | None = None,
+) -> Pipeline:
+    from pipeline.pipeline import get_brand  # noqa: WPS433 (lazy, see load_config)
+
     region = config["aws"]["region"]
     role = config["aws"]["sagemaker_role_arn"]
     bucket = config["s3"]["pipeline_artifacts_bucket"]
-    brand = config["brands"][0]
-    brand_id = brand["id"]
-    group = brand["model_package_group"]
+    first_brand_id = config["brands"][0]["id"]
+    # Validate the brand against the declared registry group (refuses arbitrary
+    # package-group combinations) instead of trusting config["brands"][0] blindly.
+    brand = get_brand(config, first_brand_id)
+    brand_id = brand.id
+    group = brand.model_package_group
     sel = config["data_selection"]
     session = PipelineSession()
 
@@ -413,23 +480,85 @@ def build(config: dict, code_prefix: str, images_uri: str) -> Pipeline:
     )
 
     return Pipeline(
-        name=f"miso-food-classifier-{brand_id}",
+        name=pipeline_name or f"miso-food-classifier-{brand_id}",
         steps=[select_step, dataset_gate],
         sagemaker_session=session,
     )
 
 
+def _default_pipeline_name(config: dict[str, Any], relaxed: bool) -> str:
+    brand_id = config["brands"][0]["id"]
+    prefix = SMOKE_PIPELINE_PREFIX if relaxed else PRODUCTION_PIPELINE_PREFIX
+    return f"{prefix}-{brand_id}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="config.smoke.yaml")
+    # --config has no default: a documented command *must* name the config to
+    # prevent silently loading the relaxed smoke overlay and overwriting the
+    # Terraform-managed production pipeline.
+    parser.add_argument("--config", required=True)
     parser.add_argument("--code-prefix", default="code")
     parser.add_argument("--images-uri", required=True)
+    parser.add_argument(
+        "--pipeline-name",
+        default=None,
+        help=(
+            "Explicit SageMaker pipeline name. If omitted, production configs "
+            "use 'miso-food-classifier-<brand>' and relaxed/smoke configs use "
+            "'smoke-miso-food-classifier-<brand>' so --upsert cannot overwrite "
+            "the Terraform-managed production pipeline."
+        ),
+    )
+    parser.add_argument(
+        "--i-understand-this-is-a-smoke-config",
+        dest="acknowledge_smoke",
+        action="store_true",
+        help=(
+            "Required acknowledgement when --config points at a relaxed overlay "
+            "whose gate values are weaker than the production floors."
+        ),
+    )
     parser.add_argument("--upsert", action="store_true")
     parser.add_argument("--run", action="store_true")
     args = parser.parse_args()
 
     config = load_config(args.config)
-    pipeline = build(config, args.code_prefix, args.images_uri)
+    weak_fields = _relaxed_fields(config)
+    is_relaxed = bool(weak_fields)
+
+    if is_relaxed and not args.acknowledge_smoke:
+        joined = "\n  - ".join(weak_fields)
+        parser.error(
+            "config has gate values weaker than the production floors:\n  - "
+            f"{joined}\n"
+            "Re-run with --i-understand-this-is-a-smoke-config to confirm "
+            "this is a smoke deployment."
+        )
+
+    pipeline_name = args.pipeline_name or _default_pipeline_name(config, is_relaxed)
+
+    # Belt-and-braces: never let a relaxed/smoke run upsert over a pipeline
+    # name that collides with the production prefix. If the operator passed an
+    # explicit --pipeline-name that still looks like the production name, we
+    # refuse rather than overwrite the Terraform-managed definition.
+    if is_relaxed and args.upsert:
+        brand_id = config["brands"][0]["id"]
+        production_name = f"{PRODUCTION_PIPELINE_PREFIX}-{brand_id}"
+        collides = pipeline_name == production_name or (
+            pipeline_name.startswith(f"{PRODUCTION_PIPELINE_PREFIX}-")
+            and not pipeline_name.startswith(f"{SMOKE_PIPELINE_PREFIX}-")
+        )
+        if collides:
+            parser.error(
+                f"refusing to --upsert a relaxed/smoke config onto pipeline "
+                f"name {pipeline_name!r}: it collides with the production "
+                f"pipeline name prefix {PRODUCTION_PIPELINE_PREFIX!r}. "
+                "Pass --pipeline-name with a distinct name (e.g. prefixed "
+                f"{SMOKE_PIPELINE_PREFIX!r})."
+            )
+
+    pipeline = build(config, args.code_prefix, args.images_uri, pipeline_name=pipeline_name)
     role = config["aws"]["sagemaker_role_arn"]
 
     if args.upsert:
