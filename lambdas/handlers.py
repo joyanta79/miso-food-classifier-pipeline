@@ -42,6 +42,17 @@ _DEFAULT_IDEMPOTENCY_WINDOW_SECONDS = 300
 # therefore suppress a new start for the same brand.
 _IN_FLIGHT_PIPELINE_STATES = frozenset({"Executing", "Stopping"})
 
+# Upper bound on the ``list_pipeline_executions`` page used as the secondary
+# in-flight signal. SageMaker caps ``MaxResults`` at 100; one page sorted by
+# ``CreationTime Descending`` is enough to notice any brand currently running
+# because the probe only needs to see any in-flight start, not enumerate all
+# of history.
+_IN_FLIGHT_LIST_PAGE_SIZE = 100
+
+# Hard upper bound on how many pages the probe will walk, so a chatty
+# control plane cannot turn the check into an unbounded fan-out.
+_IN_FLIGHT_LIST_MAX_PAGES = 5
+
 
 def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
     """Load the shared project configuration without mutating it."""
@@ -198,53 +209,216 @@ def _idempotency_window_seconds() -> int:
     return value if value > 0 else _DEFAULT_IDEMPOTENCY_WINDOW_SECONDS
 
 
+def _safe_brand_token(brand_id: str) -> str:
+    """Return the canonicalized brand token used in display names / tags.
+
+    Centralizing the sanitization keeps the duplicate-execution probe,
+    display name, and reservation lock all comparing the same value instead
+    of mixing the raw ``brand_id`` with its sanitized form.
+    """
+    return "".join(ch if ch.isalnum() or ch == "-" else "-" for ch in brand_id)[:40]
+
+
+def _idempotency_bucket(now: float | None = None) -> int:
+    window = _idempotency_window_seconds()
+    return int((now if now is not None else time.time()) // window)
+
+
 def _pipeline_execution_display_name(
     brand_id: str, pipeline_name: str, now: float | None = None
 ) -> str:
     """Deterministic display name scoped to brand + current throttle window.
 
-    SageMaker enforces that ``PipelineExecutionDisplayName`` is unique per
-    pipeline, so two starts for the same brand that fall inside the same
-    window collide and the second call fails fast (idempotent retry) instead
-    of booting a second GPU training job.
+    SageMaker does **not** enforce that ``PipelineExecutionDisplayName`` is
+    unique per pipeline, so this value alone cannot be relied on as a
+    duplicate-start guard; the real guards are the DynamoDB conditional
+    reservation (``_acquire_execution_reservation``) and the deterministic
+    ``ClientRequestToken`` passed to ``start_pipeline_execution``. The
+    display name is still useful as a human-readable correlation id and as
+    a secondary signal for the list-based probe.
     """
-    window = _idempotency_window_seconds()
-    bucket = int((now if now is not None else time.time()) // window)
+    bucket = _idempotency_bucket(now)
     digest = hashlib.sha1(
         f"{pipeline_name}:{brand_id}:{bucket}".encode()
     ).hexdigest()[:12]
-    safe_brand = "".join(ch if ch.isalnum() or ch == "-" else "-" for ch in brand_id)[:40]
+    safe_brand = _safe_brand_token(brand_id)
     return f"brand-{safe_brand}-{bucket}-{digest}"
+
+
+def _client_request_token(brand_id: str, pipeline_name: str, now: float | None = None) -> str:
+    """Deterministic idempotency token for ``start_pipeline_execution``.
+
+    Collapses retries of the same logical trigger (same brand, same throttle
+    window) into a single SageMaker-side execution regardless of how many
+    concurrent Lambda invocations call Start. The token is derived from the
+    sanitized brand so a raw-brand variant cannot escape the dedup.
+    SageMaker requires the token to be 1-128 chars and match ``[a-zA-Z0-9-]*``.
+    """
+    bucket = _idempotency_bucket(now)
+    digest = hashlib.sha256(
+        f"{pipeline_name}:{brand_id}:{bucket}".encode()
+    ).hexdigest()[:32]
+    return f"miso-{bucket}-{digest}"
 
 
 def _has_in_flight_execution(sagemaker: Any, pipeline_name: str, brand_id: str) -> bool:
     """Return True if a pipeline execution for ``brand_id`` is already running.
 
-    Falls back to ``False`` -- letting ``start_pipeline_execution`` be the sole
-    gate -- when the injected client does not implement
+    This is only a best-effort secondary signal: the authoritative guard is
+    the atomic reservation acquired by ``_acquire_execution_reservation`` and
+    the deterministic ``ClientRequestToken`` passed to
+    ``start_pipeline_execution``. The probe paginates with ``MaxResults`` so
+    a long execution history cannot hide an in-flight run on page 2+, and it
+    matches against the sanitized brand token used by the display name --
+    the raw-``brand_id`` substring compare was both false-negative
+    (sanitization mismatch -> duplicate start) and false-positive
+    (one brand suppressing another whose id is a substring).
+
+    Falls back to ``False`` -- letting the reservation / ClientRequestToken
+    be the sole gates -- when the injected client does not implement
     ``list_pipeline_executions`` (e.g. the lightweight test doubles used in
     unit tests and local mode).
     """
     list_fn = getattr(sagemaker, "list_pipeline_executions", None)
     if list_fn is None:
         return False
-    try:
-        response = list_fn(
-            PipelineName=pipeline_name,
-            SortBy="CreationTime",
-            SortOrder="Descending",
-        )
-    except Exception:
-        # Fail closed on the in-flight check so a throttled or permission-
-        # denied List call cannot escalate into unbounded Starts.
-        return True
-    for summary in response.get("PipelineExecutionSummaries", []) or []:
-        if summary.get("PipelineExecutionStatus") not in _IN_FLIGHT_PIPELINE_STATES:
-            continue
-        display_name = summary.get("PipelineExecutionDisplayName", "")
-        if display_name.startswith(f"brand-{brand_id}-") or f"-{brand_id}-" in display_name:
+    safe_brand = _safe_brand_token(brand_id)
+    display_prefix = f"brand-{safe_brand}-"
+    next_token: str | None = None
+    for _ in range(_IN_FLIGHT_LIST_MAX_PAGES):
+        request_kwargs: dict[str, Any] = {
+            "PipelineName": pipeline_name,
+            "SortBy": "CreationTime",
+            "SortOrder": "Descending",
+            "MaxResults": _IN_FLIGHT_LIST_PAGE_SIZE,
+        }
+        if next_token:
+            request_kwargs["NextToken"] = next_token
+        try:
+            response = list_fn(**request_kwargs)
+        except TypeError:
+            # Older/stub clients may not accept ``MaxResults``/``NextToken``.
+            # Retry with just the minimum kwargs so the probe still runs.
+            try:
+                response = list_fn(
+                    PipelineName=pipeline_name,
+                    SortBy="CreationTime",
+                    SortOrder="Descending",
+                )
+            except Exception:
+                return True
+            next_token = None
+        except Exception:
+            # Fail closed on the in-flight check so a throttled or permission-
+            # denied List call cannot escalate into unbounded Starts.
             return True
+        for summary in response.get("PipelineExecutionSummaries", []) or []:
+            if summary.get("PipelineExecutionStatus") not in _IN_FLIGHT_PIPELINE_STATES:
+                continue
+            display_name = summary.get("PipelineExecutionDisplayName", "")
+            if display_name.startswith(display_prefix):
+                return True
+        next_token = response.get("NextToken") if isinstance(response, dict) else None
+        if not next_token:
+            break
     return False
+
+
+def _reservation_table_name() -> str | None:
+    name = os.environ.get("MISO_EXECUTION_LOCK_TABLE")
+    return name.strip() if name and name.strip() else None
+
+
+def _reservation_key(pipeline_name: str, brand_id: str, now: float | None = None) -> str:
+    bucket = _idempotency_bucket(now)
+    safe_brand = _safe_brand_token(brand_id)
+    return f"{pipeline_name}#{safe_brand}#{bucket}"
+
+
+def _acquire_execution_reservation(
+    dynamodb: Any,
+    pipeline_name: str,
+    brand_id: str,
+    now: float | None = None,
+) -> tuple[bool, str | None]:
+    """Atomically reserve the right to start one execution for a brand/window.
+
+    Uses a DynamoDB ``PutItem`` with ``ConditionExpression`` of
+    ``attribute_not_exists(pk)`` so exactly one concurrent trigger wins the
+    reservation; all others see ``ConditionalCheckFailedException`` and must
+    skip. The item carries a TTL (``expires_at``) so a crashed executor
+    cannot wedge the brand forever.
+
+    Returns ``(acquired, reservation_key)``. If ``dynamodb`` is ``None`` or
+    the table name is not configured, returns ``(True, None)`` -- the
+    deterministic ``ClientRequestToken`` on ``start_pipeline_execution`` is
+    still enforced server-side, so this degradation does not re-open the
+    duplicate-start race in environments that have not provisioned the lock
+    table yet.
+    """
+    if dynamodb is None:
+        return True, None
+    table_name = _reservation_table_name()
+    if not table_name:
+        return True, None
+    put_item = getattr(dynamodb, "put_item", None)
+    if put_item is None:
+        return True, None
+    reservation_key = _reservation_key(pipeline_name, brand_id, now)
+    now_ts = int(now if now is not None else time.time())
+    # TTL slightly larger than the throttle window so a successful Start that
+    # outlives the window still blocks concurrent peers for its duration.
+    ttl = now_ts + max(_idempotency_window_seconds() * 2, 600)
+    try:
+        put_item(
+            TableName=table_name,
+            Item={
+                "pk": {"S": reservation_key},
+                "pipeline_name": {"S": pipeline_name},
+                "brand_id": {"S": _safe_brand_token(brand_id)},
+                "created_at": {"N": str(now_ts)},
+                "expires_at": {"N": str(ttl)},
+            },
+            ConditionExpression="attribute_not_exists(pk)",
+        )
+    except Exception as exc:  # noqa: BLE001 - boto3 exception hierarchy varies
+        name = type(exc).__name__
+        response_meta = getattr(exc, "response", None) or {}
+        error_code = ""
+        if isinstance(response_meta, dict):
+            error_code = (response_meta.get("Error") or {}).get("Code", "")
+        if name == "ConditionalCheckFailedException" or error_code == "ConditionalCheckFailedException":
+            return False, reservation_key
+        # Fail closed: an unavailable lock table must not silently disable
+        # the duplicate-start guard.
+        raise
+    return True, reservation_key
+
+
+def _release_execution_reservation(
+    dynamodb: Any, reservation_key: str | None
+) -> None:
+    """Best-effort release used when Start fails after a reservation was taken.
+
+    Terminal-state cleanup is left to the TTL; this helper only unblocks
+    peers if the Start call itself failed so a transient SageMaker error does
+    not consume the brand's throttle window.
+    """
+    if dynamodb is None or not reservation_key:
+        return
+    table_name = _reservation_table_name()
+    if not table_name:
+        return
+    delete_item = getattr(dynamodb, "delete_item", None)
+    if delete_item is None:
+        return
+    try:
+        delete_item(
+            TableName=table_name,
+            Key={"pk": {"S": reservation_key}},
+        )
+    except Exception:  # noqa: BLE001 - cleanup is best-effort
+        return
 
 
 def eventbridge_trigger_handler(
@@ -252,14 +426,25 @@ def eventbridge_trigger_handler(
     _context: Any,
     *,
     sagemaker_client: Any | None = None,
+    dynamodb_client: Any | None = None,
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Start the per-brand SageMaker pipeline from an EventBridge request.
 
-    Guards against upload storms by (1) short-circuiting when an execution for
-    the same brand is already running and (2) pinning a deterministic
-    ``PipelineExecutionDisplayName`` so retries inside the throttle window
-    collide instead of launching new GPU training jobs.
+    Duplicate-execution suppression is layered so no single component is a
+    load-bearing uniqueness guarantee:
+
+    * Atomic reservation: when ``MISO_EXECUTION_LOCK_TABLE`` is configured a
+      DynamoDB ``PutItem`` with ``ConditionExpression=attribute_not_exists``
+      wins exactly once per brand/window across concurrent Lambda
+      invocations. The TTL releases the slot if the executor crashes.
+    * Deterministic ``ClientRequestToken``: SageMaker collapses retries that
+      share the token into a single execution, so even a race that bypasses
+      the reservation (lock table unavailable, test doubles) still cannot
+      launch two GPU jobs for the same logical trigger.
+    * Best-effort list probe: a paginated ``list_pipeline_executions`` scan
+      is retained as a secondary signal that short-circuits the obvious case
+      where a run is already visible on the control plane.
     """
     resolved_config = config or load_config()
     detail = event.get("detail", event)
@@ -286,20 +471,55 @@ def eventbridge_trigger_handler(
             "reason": "in_flight_execution",
         }
 
+    # Only reach for a DynamoDB client when a lock table is actually
+    # configured, so unit tests and local-mode runs (which never provision
+    # one) do not require boto3.
+    dynamodb: Any | None = dynamodb_client
+    if dynamodb is None and _reservation_table_name():
+        dynamodb = _client("dynamodb", None)
+
+    acquired, reservation_key = _acquire_execution_reservation(
+        dynamodb, pipeline_name, brand_id
+    )
+    if not acquired:
+        return {
+            "brand_id": brand_id,
+            "pipeline_execution_arn": None,
+            "trigger": trigger,
+            "skipped": True,
+            "reason": "reservation_held",
+        }
+
     display_name = _pipeline_execution_display_name(brand_id, pipeline_name)
+    client_request_token = _client_request_token(brand_id, pipeline_name)
+    start_kwargs: dict[str, Any] = {
+        "PipelineName": pipeline_name,
+        "PipelineParameters": _pipeline_parameters(brand_id, trigger, resolved_config),
+        "PipelineExecutionDisplayName": display_name,
+        "ClientRequestToken": client_request_token,
+    }
     try:
-        response = sagemaker.start_pipeline_execution(
-            PipelineName=pipeline_name,
-            PipelineParameters=_pipeline_parameters(brand_id, trigger, resolved_config),
-            PipelineExecutionDisplayName=display_name,
-        )
-    except TypeError:
-        # Test doubles / older clients that do not accept the idempotency
-        # kwarg still work; the display name is then best-effort only.
-        response = sagemaker.start_pipeline_execution(
-            PipelineName=pipeline_name,
-            PipelineParameters=_pipeline_parameters(brand_id, trigger, resolved_config),
-        )
+        try:
+            response = sagemaker.start_pipeline_execution(**start_kwargs)
+        except TypeError:
+            # Test doubles / older clients may not accept the idempotency
+            # kwargs. Degrade gracefully by dropping them one at a time so
+            # the server-side guards are preserved whenever possible.
+            fallback_kwargs = dict(start_kwargs)
+            for optional in ("ClientRequestToken", "PipelineExecutionDisplayName"):
+                fallback_kwargs.pop(optional, None)
+                try:
+                    response = sagemaker.start_pipeline_execution(**fallback_kwargs)
+                    break
+                except TypeError:
+                    continue
+            else:
+                raise
+    except Exception:
+        # Release the reservation so a transient Start failure does not
+        # consume the brand's throttle window.
+        _release_execution_reservation(dynamodb, reservation_key)
+        raise
     return {
         "brand_id": brand_id,
         "pipeline_execution_arn": response["PipelineExecutionArn"],
@@ -395,6 +615,7 @@ def manual_trigger_handler(
     context: Any,
     *,
     sagemaker_client: Any | None = None,
+    dynamodb_client: Any | None = None,
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Start a brand pipeline from an authenticated manual invocation.
@@ -441,5 +662,6 @@ def manual_trigger_handler(
         {"detail": {"brand_id": brand_id, "trigger": "manual"}},
         context,
         sagemaker_client=sagemaker_client,
+        dynamodb_client=dynamodb_client,
         config=config,
     )
