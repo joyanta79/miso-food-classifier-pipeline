@@ -56,7 +56,6 @@ _bootstrap.ensure({"numpy": "numpy"})
 
 import numpy as np  # noqa: E402
 
-
 # A sentinel multiplier the DriftGate will always reject. DriftGate asserts
 # correction_rate_multiplier <= CorrectionRateMultiplier (a small positive
 # number such as 3). Using a very large finite float keeps the metrics file
