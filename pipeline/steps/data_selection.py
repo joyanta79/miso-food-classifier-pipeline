@@ -138,7 +138,10 @@ def select(
         # use the same namespace. ``id`` and ``key`` are set to the same
         # relative key so records are uniquely identified even when two files
         # under different sub-prefixes share a basename.
-        rel_path = path.relative_to(image_root).as_posix()
+        try:
+            rel_path = path.relative_to(image_root).as_posix()
+        except ValueError:
+            rel_path = Path(path.name).as_posix()
         label_counts[label] += 1
         manifest.append(
             {
