@@ -16,6 +16,7 @@ s3:
   model_artifacts_bucket: "sagemaker-us-west-2-<replace-with-account-id>"
   pipeline_artifacts_bucket: "sagemaker-us-west-2-<replace-with-account-id>"
   raw_archive_bucket: "sagemaker-us-west-2-<replace-with-account-id>"
+  code_manifest_digest: "0000000000000000000000000000000000000000000000000000000000000000"
 brands:
   - id: white-castle
     naming_pattern: "wc_*"

@@ -24,6 +24,12 @@ resource "aws_s3_bucket" "artifacts" {
   bucket        = each.value
   force_destroy = false
 
+  # Object Lock protects the published code bundles against overwrite/delete
+  # by any principal (including the CI publisher) once a retention is applied
+  # (CWE-494). It is enabled at bucket-creation time; retention policy for the
+  # ``code@sha256=*`` prefixes should be configured out-of-band per bundle.
+  object_lock_enabled = each.key == "pipeline-artifacts"
+
   tags = {
     Name    = each.value
     Purpose = each.key
@@ -61,9 +67,20 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "artifacts" {
 }
 
 # No lifecycle transition rules are defined: all buckets retain the S3 Standard
-# storage class. Versioning is intentionally enabled for this bucket only.
+# storage class. Versioning is enabled for the model-artifacts bucket (model
+# traceability) and the pipeline-artifacts bucket (code-bundle immutability --
+# CWE-494: an overwrite of a ``code@sha256=*`` prefix is otherwise
+# unrecoverable and untraceable).
 resource "aws_s3_bucket_versioning" "model_artifacts" {
   bucket = aws_s3_bucket.artifacts["model-artifacts"].id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "pipeline_artifacts" {
+  bucket = aws_s3_bucket.artifacts["pipeline-artifacts"].id
 
   versioning_configuration {
     status = "Enabled"
@@ -92,6 +109,7 @@ resource "aws_sagemaker_pipeline" "brand" {
   depends_on = [
     aws_sagemaker_model_package_group.brand,
     aws_s3_bucket_versioning.model_artifacts,
+    aws_s3_bucket_versioning.pipeline_artifacts,
   ]
 
   tags = {

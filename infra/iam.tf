@@ -56,6 +56,34 @@ data "aws_iam_policy_document" "sagemaker_permissions" {
     resources = local.bucket_arns
   }
 
+  # Explicit Deny for writes to the code channel on the pipeline-artifacts
+  # bucket. The step containers execute code they fetch from these prefixes;
+  # giving the job role ``s3:PutObject``/``s3:DeleteObject`` on them is the
+  # CWE-494 "job can rewrite the code it later executes" root cause. Publish
+  # rights to these prefixes are granted only to the CI/deploy identity; a
+  # misbehaving job cannot overwrite its own bundle.
+  statement {
+    sid    = "DenyCodeChannelMutation"
+    effect = "Deny"
+    actions = [
+      "s3:PutObject",
+      "s3:PutObjectAcl",
+      "s3:DeleteObject",
+      "s3:DeleteObjectVersion",
+    ]
+    resources = [
+      "${aws_s3_bucket.artifacts["pipeline-artifacts"].arn}/*/code@sha256=*",
+      "${aws_s3_bucket.artifacts["pipeline-artifacts"].arn}/*/code@sha256=*/*",
+      # Belt-and-braces: cover the legacy mutable prefix too, so a stale
+      # exported definition that still points at ``.../code`` cannot be
+      # rewritten by a job even if it is ever applied.
+      "${aws_s3_bucket.artifacts["pipeline-artifacts"].arn}/code",
+      "${aws_s3_bucket.artifacts["pipeline-artifacts"].arn}/code/*",
+      "${aws_s3_bucket.artifacts["pipeline-artifacts"].arn}/*/code",
+      "${aws_s3_bucket.artifacts["pipeline-artifacts"].arn}/*/code/*",
+    ]
+  }
+
   # SageMaker jobs and registry within this account/region. ``StartPipelineExecution``
   # is split out below and scoped to the specific per-brand pipeline ARNs so a
   # misbehaving caller cannot start arbitrary pipelines in the account (confused
