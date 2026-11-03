@@ -11,16 +11,70 @@ the smoke dataset, exactly as the local end-to-end driver does.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import sys
+import tarfile
 from datetime import datetime, timezone
 
 UTC = timezone.utc
 from pathlib import Path
 
 IN = Path("/opt/ml/processing/input")
-CODE = Path("/opt/ml/processing/input/code")
+MOUNT = Path("/opt/ml/processing/input/code")
 OUT = Path("/opt/ml/processing/output")
+
+
+def _verify_and_extract_code(mount: Path) -> Path:
+    """Verify the uploaded code tarball and extract it to a trusted path.
+
+    The submitter (``scripts/sm_submit_clean.py``) uploads the packaged source
+    tree to a per-digest S3 prefix and passes the expected SHA-256 via the
+    ``MISO_CODE_SHA256`` environment variable. We refuse to touch ``sys.path``
+    with the raw mount: an attacker who could add a sibling object under the
+    code prefix would otherwise get arbitrary code execution. Instead we hash
+    the tarball, compare against the expected digest (fail-closed if either
+    the env var or the tarball is missing), and extract to a scratch
+    directory that only contains the content whose hash we just verified.
+    """
+    expected = os.environ.get("MISO_CODE_SHA256")
+    if not expected:
+        raise RuntimeError(
+            "MISO_CODE_SHA256 is not set; refusing to execute unverified code from "
+            f"{mount} (CWE-829)."
+        )
+    tarball = mount / "payload.tar.gz"
+    if not tarball.is_file():
+        raise RuntimeError(
+            f"Expected code tarball at {tarball} not found; refusing to execute "
+            "unverified code (CWE-829)."
+        )
+    digest = hashlib.sha256(tarball.read_bytes()).hexdigest()
+    if digest != expected:
+        raise RuntimeError(
+            f"Code tarball sha256 mismatch: got {digest}, expected {expected}. "
+            "Refusing to execute (CWE-1214)."
+        )
+    extracted = Path("/tmp/miso_code_verified")
+    if extracted.exists():
+        import shutil as _shutil
+
+        _shutil.rmtree(extracted)
+    extracted.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(tarball) as tar:
+        for member in tar.getmembers():
+            mname = member.name
+            if mname.startswith("/") or ".." in Path(mname).parts:
+                raise RuntimeError(f"Unsafe tar member rejected: {mname}")
+            if member.issym() or member.islnk():
+                raise RuntimeError(f"Link members not allowed in code tarball: {mname}")
+        tar.extractall(extracted)
+    print(f"[verify] code sha256 OK ({digest}); extracted to {extracted}", flush=True)
+    return extracted
+
+
+CODE = _verify_and_extract_code(MOUNT)
 
 # The shared bootstrap enforces --require-hashes / --no-deps and a pinned
 # private index, and refuses to resolve bare names from the public PyPI.
