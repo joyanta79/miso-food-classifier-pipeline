@@ -113,6 +113,10 @@ def test_safety_gate_right_values_are_literal_and_match_config() -> None:
         evaluation["accuracy_threshold"],
         evaluation["fp_rate_emergency_threshold"],
         evaluation["latency_budget_ms"],
+        evaluation["min_sample_count"],
+        evaluation["min_per_class_count"],
+        evaluation["min_per_class_count"],
+        0,
     ]
     assert _right_values("DriftGate") == [
         drift["level1_confidence_floor"],

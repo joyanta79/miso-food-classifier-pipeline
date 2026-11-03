@@ -743,8 +743,12 @@
                           },
                           "Environment": {
                             "ACCURACY_THRESHOLD": "0.97",
+                            "DONE_LABEL": "done",
                             "FP_RATE_EMERGENCY_THRESHOLD": "0.05",
-                            "LATENCY_BUDGET_MS": "1000"
+                            "LATENCY_BUDGET_MS": "1000",
+                            "MIN_PER_CLASS_COUNT": "50",
+                            "MIN_SAMPLE_COUNT": "100",
+                            "NOT_DONE_LABEL": "not_done"
                           },
                           "ProcessingInputs": [
                             {
@@ -836,6 +840,54 @@
                                 }
                               },
                               "RightValue": 1000,
+                              "Type": "ConditionLessThanOrEqualTo"
+                            },
+                            {
+                              "LeftValue": {
+                                "Std:JsonGet": {
+                                  "Path": "sample_count",
+                                  "PropertyFile": {
+                                    "Get": "Steps.EvaluateModel.PropertyFiles.EvaluationMetrics"
+                                  }
+                                }
+                              },
+                              "RightValue": 100,
+                              "Type": "ConditionGreaterThanOrEqualTo"
+                            },
+                            {
+                              "LeftValue": {
+                                "Std:JsonGet": {
+                                  "Path": "not_done_sample_count",
+                                  "PropertyFile": {
+                                    "Get": "Steps.EvaluateModel.PropertyFiles.EvaluationMetrics"
+                                  }
+                                }
+                              },
+                              "RightValue": 50,
+                              "Type": "ConditionGreaterThanOrEqualTo"
+                            },
+                            {
+                              "LeftValue": {
+                                "Std:JsonGet": {
+                                  "Path": "done_sample_count",
+                                  "PropertyFile": {
+                                    "Get": "Steps.EvaluateModel.PropertyFiles.EvaluationMetrics"
+                                  }
+                                }
+                              },
+                              "RightValue": 50,
+                              "Type": "ConditionGreaterThanOrEqualTo"
+                            },
+                            {
+                              "LeftValue": {
+                                "Std:JsonGet": {
+                                  "Path": "missing_images",
+                                  "PropertyFile": {
+                                    "Get": "Steps.EvaluateModel.PropertyFiles.EvaluationMetrics"
+                                  }
+                                }
+                              },
+                              "RightValue": 0,
                               "Type": "ConditionLessThanOrEqualTo"
                             }
                           ],

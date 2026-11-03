@@ -224,6 +224,9 @@ def build_parameters(config: Mapping[str, Any], brand: Brand) -> list[dict[str, 
         # RightValues into EvaluateModelQualityGate so that a caller with
         # sagemaker:StartPipelineExecution cannot override and bypass the model-release
         # safety gates.
+        # NOTE: DoneLabel/NotDoneLabel and the evaluation sample-count floors are
+        # deliberately NOT exposed as pipeline parameters; they are baked into the
+        # EvaluateModel environment and EvaluateModelQualityGate as literals.
         (
             "ConfidenceBaseline",
             drift["confidence_baseline"],
@@ -689,6 +692,18 @@ def build_dry_run_definition(
             "LATENCY_BUDGET_MS": _literal_env_value(
                 config["evaluation"]["latency_budget_ms"]
             ),
+            # Labels and sample-count floors feeding the emergency-FP metric and the
+            # EvaluateModelQualityGate are safety-critical too; inject as literals.
+            "DONE_LABEL": _literal_env_value(config["evaluation"].get("done_label", "done")),
+            "NOT_DONE_LABEL": _literal_env_value(
+                config["evaluation"].get("not_done_label", "not_done")
+            ),
+            "MIN_SAMPLE_COUNT": _literal_env_value(
+                int(config["evaluation"].get("min_sample_count", 1))
+            ),
+            "MIN_PER_CLASS_COUNT": _literal_env_value(
+                int(config["evaluation"].get("min_per_class_count", 1))
+            ),
         },
         [
             {
@@ -793,6 +808,34 @@ def build_dry_run_definition(
                     "Type": "ConditionLessThanOrEqualTo",
                     "LeftValue": _step_ref("EvaluateModel", "EvaluationMetrics", "latency_ms"),
                     "RightValue": config["evaluation"]["latency_budget_ms"],
+                },
+                {
+                    "Type": "ConditionGreaterThanOrEqualTo",
+                    "LeftValue": _step_ref(
+                        "EvaluateModel", "EvaluationMetrics", "sample_count"
+                    ),
+                    "RightValue": int(config["evaluation"].get("min_sample_count", 1)),
+                },
+                {
+                    "Type": "ConditionGreaterThanOrEqualTo",
+                    "LeftValue": _step_ref(
+                        "EvaluateModel", "EvaluationMetrics", "not_done_sample_count"
+                    ),
+                    "RightValue": int(config["evaluation"].get("min_per_class_count", 1)),
+                },
+                {
+                    "Type": "ConditionGreaterThanOrEqualTo",
+                    "LeftValue": _step_ref(
+                        "EvaluateModel", "EvaluationMetrics", "done_sample_count"
+                    ),
+                    "RightValue": int(config["evaluation"].get("min_per_class_count", 1)),
+                },
+                {
+                    "Type": "ConditionLessThanOrEqualTo",
+                    "LeftValue": _step_ref(
+                        "EvaluateModel", "EvaluationMetrics", "missing_images"
+                    ),
+                    "RightValue": 0,
                 },
             ],
             "IfSteps": [register_model],
@@ -1009,6 +1052,10 @@ def validate_dry_run_definition(definition: Mapping[str, Any]) -> None:
         "TargetDatasetMin",
         "TargetDatasetMax",
         "MinImagesPerClass",
+        "EvaluationMinSampleCount",
+        "EvaluationMinPerClassCount",
+        "DoneLabel",
+        "NotDoneLabel",
     )
     forbidden_present = sorted(name for name in _forbidden_gate_parameters if name in parameters)
     if forbidden_present:
@@ -1393,6 +1440,38 @@ def build_sagemaker_pipeline(
                     json_path="latency_ms",
                 ),
                 right=evaluation["latency_budget_ms"],
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=evaluation_step.name,
+                    property_file=evaluation_report,
+                    json_path="sample_count",
+                ),
+                right=int(evaluation.get("min_sample_count", 1)),
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=evaluation_step.name,
+                    property_file=evaluation_report,
+                    json_path="not_done_sample_count",
+                ),
+                right=int(evaluation.get("min_per_class_count", 1)),
+            ),
+            ConditionGreaterThanOrEqualTo(
+                left=JsonGet(
+                    step_name=evaluation_step.name,
+                    property_file=evaluation_report,
+                    json_path="done_sample_count",
+                ),
+                right=int(evaluation.get("min_per_class_count", 1)),
+            ),
+            ConditionLessThanOrEqualTo(
+                left=JsonGet(
+                    step_name=evaluation_step.name,
+                    property_file=evaluation_report,
+                    json_path="missing_images",
+                ),
+                right=0,
             ),
         ],
         if_steps=[register_step],
