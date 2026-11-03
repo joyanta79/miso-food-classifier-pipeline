@@ -152,18 +152,38 @@ def _positive_int(value, default: int) -> int:
 
 
 def _load_model(model_dir: Path):
+    """Load the trained Keras model from the single extracted training artifact.
+
+    The caller MUST have extracted ``model.tar.gz`` from the training step's
+    ``S3ModelArtifacts`` into ``model_dir`` (via ``_safe_extract_tar``) before
+    invoking this function. Only paths produced by that extraction are
+    considered; the broader ``model_dir`` tree is not scanned so a stray
+    ``*.keras`` dropped by any other principal (for example a sibling job
+    container writing under a shared bucket prefix) cannot decide what the
+    release gate evaluates.
+    """
     import tensorflow as tf
 
-    # train.py saves either a SavedModel dir or model.keras; find it.
+    # train.py saves either a SavedModel dir or model.keras; find it among the
+    # well-known top-level locations of a training artifact tarball. We do NOT
+    # fall back to an rglob over the whole mount, which would pick up
+    # alien ``*.keras`` files living outside the extracted archive.
     for candidate in ("model.keras", "1", "model"):
         p = model_dir / candidate
-        if p.exists():
+        if not p.exists():
+            continue
+        if p.is_file() and p.name == "model.keras":
             return tf.keras.models.load_model(p)
-    # Fall back: first loadable entry.
-    for p in sorted(model_dir.rglob("*")):
-        if p.name.endswith(".keras") or (p.is_dir() and (p / "saved_model.pb").exists()):
+        if p.is_dir() and (p / "saved_model.pb").exists():
             return tf.keras.models.load_model(p)
-    raise FileNotFoundError(f"No loadable model found under {model_dir}")
+    raise FileNotFoundError(
+        "No loadable model found at the expected top-level locations "
+        f"({', '.join(repr(c) for c in ('model.keras', '1', 'model'))}) under "
+        f"{model_dir!r}. The training artifact tarball must publish the Keras "
+        "model at one of these paths; refusing to search outside the extracted "
+        "archive to prevent an attacker-planted sibling artifact from being "
+        "loaded (CWE-494)."
+    )
 
 
 def main() -> None:

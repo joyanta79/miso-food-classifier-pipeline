@@ -15,6 +15,30 @@ locals {
     [for b in aws_s3_bucket.artifacts : b.arn],
     [for b in aws_s3_bucket.artifacts : "${b.arn}/*"],
   )
+
+  # Buckets whose object content the role may freely create or delete. The
+  # model-artifacts bucket is intentionally excluded: its writes are scoped
+  # below so sibling jobs cannot plant objects at a brand prefix root and
+  # decide what the EvaluateModel step loads.
+  bucket_arns_general_write = [
+    for key, bucket in aws_s3_bucket.artifacts :
+    "${bucket.arn}/*" if key != "model-artifacts"
+  ]
+
+  # The model-artifacts bucket is written to by SageMaker Training jobs under
+  # ``<brand>/<job-name>/output/*`` (training artifacts) and
+  # ``<brand>/checkpoints/*`` (managed-spot checkpoints). Both patterns have at
+  # least three ``/``-separated components after the bucket, i.e. they match
+  # ``<brand>/*/*``. Restricting the role to those shapes stops a sibling job
+  # from writing a file directly at ``<brand>/model.keras`` (two components)
+  # that the EvaluateModel step would otherwise load. Per-brand prefixes are
+  # enumerated from config.yaml so adding a brand automatically grants writes
+  # only under its own namespace.
+  model_artifacts_bucket_arn = aws_s3_bucket.artifacts["model-artifacts"].arn
+  model_artifacts_write_arns = [
+    for brand_id in keys(local.brands) :
+    "${local.model_artifacts_bucket_arn}/${brand_id}/*/*"
+  ]
 }
 
 data "aws_iam_policy_document" "sagemaker_assume" {
@@ -43,17 +67,30 @@ resource "aws_iam_role" "sagemaker" {
 data "aws_iam_policy_document" "sagemaker_permissions" {
   count = local.create_role ? 1 : 0
 
-  # Bucket-scoped object access for the four project buckets only.
+  # Bucket-scoped object access for the four project buckets only. Read and
+  # list operations stay bucket-wide; writes to the model-artifacts bucket are
+  # scoped below so a compromised sibling job cannot plant a loadable
+  # ``<brand>/model.keras`` at the brand prefix root for EvaluateModel.
   statement {
-    sid = "ProjectBucketAccess"
+    sid = "ProjectBucketRead"
     actions = [
       "s3:GetObject",
-      "s3:PutObject",
-      "s3:DeleteObject",
       "s3:ListBucket",
       "s3:GetBucketLocation",
     ]
     resources = local.bucket_arns
+  }
+
+  statement {
+    sid = "ProjectBucketWrite"
+    actions = [
+      "s3:PutObject",
+      "s3:DeleteObject",
+    ]
+    resources = concat(
+      local.bucket_arns_general_write,
+      local.model_artifacts_write_arns,
+    )
   }
 
   # SageMaker jobs and registry within this account/region. ``StartPipelineExecution``

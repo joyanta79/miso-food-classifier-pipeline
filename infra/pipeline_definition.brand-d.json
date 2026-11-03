@@ -761,7 +761,9 @@
                                 "LocalPath": "/opt/ml/processing/input/model",
                                 "S3DataType": "S3Prefix",
                                 "S3InputMode": "File",
-                                "S3Uri": "s3://<replace-model-artifacts-bucket>/brand-d"
+                                "S3Uri": {
+                                  "Get": "Steps.TrainBrandClassifier.ModelArtifacts.S3ModelArtifacts"
+                                }
                               }
                             },
                             {
