@@ -162,10 +162,16 @@ def s3_trigger_handler(
 def _pipeline_parameters(
     brand_id: str, trigger: str, config: dict[str, Any]
 ) -> list[dict[str, str]]:
+    # NOTE: Do not submit SageMakerRoleArn/*Bucket here. Those are deployment
+    # facts baked into the pipeline definition as literals; passing them as
+    # ``PipelineParameters`` would both be rejected by SageMaker (unknown
+    # parameter) and reopen the code-channel / role-override hijack path
+    # (CWE-494). The ``config`` argument is retained for forward-compatible
+    # callers but is intentionally unused.
+    del config
     return [
         {"Name": "BrandId", "Value": brand_id},
         {"Name": "TriggerSource", "Value": trigger},
-        {"Name": "TrainingBucket", "Value": config["s3"]["training_bucket"]},
     ]
 
 

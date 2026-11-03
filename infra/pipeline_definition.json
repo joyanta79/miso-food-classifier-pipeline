@@ -13,36 +13,6 @@
       "Type": "String"
     },
     {
-      "DefaultValue": "<replace-with-sagemaker-role-arn>",
-      "Description": "Execution role for SageMaker jobs.",
-      "Name": "SageMakerRoleArn",
-      "Type": "String"
-    },
-    {
-      "DefaultValue": "<replace-training-bucket>",
-      "Description": "S3 bucket for prepared training datasets.",
-      "Name": "TrainingBucket",
-      "Type": "String"
-    },
-    {
-      "DefaultValue": "<replace-model-artifacts-bucket>",
-      "Description": "S3 bucket for trained model artifacts and checkpoints.",
-      "Name": "ModelArtifactsBucket",
-      "Type": "String"
-    },
-    {
-      "DefaultValue": "<replace-pipeline-artifacts-bucket>",
-      "Description": "S3 bucket for pipeline outputs and container code contracts.",
-      "Name": "PipelineArtifactsBucket",
-      "Type": "String"
-    },
-    {
-      "DefaultValue": "<replace-raw-archive-bucket>",
-      "Description": "S3 bucket containing raw image archives.",
-      "Name": "RawArchiveBucket",
-      "Type": "String"
-    },
-    {
       "DefaultValue": "white-castle",
       "Description": "Fixed pipeline brand identifier.",
       "Name": "BrandId",
@@ -299,18 +269,7 @@
               "LocalPath": "/opt/ml/processing/input/raw",
               "S3DataType": "S3Prefix",
               "S3InputMode": "File",
-              "S3Uri": {
-                "Std:Join": {
-                  "On": "/",
-                  "Values": [
-                    "s3:/",
-                    {
-                      "Get": "Parameters.RawArchiveBucket"
-                    },
-                    ""
-                  ]
-                }
-              }
+              "S3Uri": "s3://<replace-raw-archive-bucket>/"
             }
           },
           {
@@ -319,18 +278,7 @@
               "LocalPath": "/opt/ml/processing/input/code",
               "S3DataType": "S3Prefix",
               "S3InputMode": "File",
-              "S3Uri": {
-                "Std:Join": {
-                  "On": "/",
-                  "Values": [
-                    "s3:/",
-                    {
-                      "Get": "Parameters.PipelineArtifactsBucket"
-                    },
-                    "code"
-                  ]
-                }
-              }
+              "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/code"
             }
           }
         ],
@@ -341,19 +289,7 @@
               "S3Output": {
                 "LocalPath": "/opt/ml/processing/output/dataset",
                 "S3UploadMode": "EndOfJob",
-                "S3Uri": {
-                  "Std:Join": {
-                    "On": "/",
-                    "Values": [
-                      "s3:/",
-                      {
-                        "Get": "Parameters.TrainingBucket"
-                      },
-                      "white-castle",
-                      "selected"
-                    ]
-                  }
-                }
+                "S3Uri": "s3://<replace-training-bucket>/white-castle/selected"
               }
             },
             {
@@ -361,19 +297,7 @@
               "S3Output": {
                 "LocalPath": "/opt/ml/processing/output/metrics",
                 "S3UploadMode": "EndOfJob",
-                "S3Uri": {
-                  "Std:Join": {
-                    "On": "/",
-                    "Values": [
-                      "s3:/",
-                      {
-                        "Get": "Parameters.PipelineArtifactsBucket"
-                      },
-                      "white-castle",
-                      "selection"
-                    ]
-                  }
-                }
+                "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/white-castle/selection"
               }
             }
           ]
@@ -387,9 +311,7 @@
             "VolumeSizeInGB": 30
           }
         },
-        "RoleArn": {
-          "Get": "Parameters.SageMakerRoleArn"
-        }
+        "RoleArn": "<replace-with-sagemaker-role-arn>"
       },
       "Name": "SelectRecentBrandData",
       "PropertyFiles": [
@@ -493,19 +415,7 @@
                     "LocalPath": "/opt/ml/processing/input/dataset",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
-                    "S3Uri": {
-                      "Std:Join": {
-                        "On": "/",
-                        "Values": [
-                          "s3:/",
-                          {
-                            "Get": "Parameters.TrainingBucket"
-                          },
-                          "white-castle",
-                          "selected"
-                        ]
-                      }
-                    }
+                    "S3Uri": "s3://<replace-training-bucket>/white-castle/selected"
                   }
                 },
                 {
@@ -514,18 +424,7 @@
                     "LocalPath": "/opt/ml/processing/input/code",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
-                    "S3Uri": {
-                      "Std:Join": {
-                        "On": "/",
-                        "Values": [
-                          "s3:/",
-                          {
-                            "Get": "Parameters.PipelineArtifactsBucket"
-                          },
-                          "code"
-                        ]
-                      }
-                    }
+                    "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/code"
                   }
                 }
               ],
@@ -536,19 +435,7 @@
                     "S3Output": {
                       "LocalPath": "/opt/ml/processing/output/dataset",
                       "S3UploadMode": "EndOfJob",
-                      "S3Uri": {
-                        "Std:Join": {
-                          "On": "/",
-                          "Values": [
-                            "s3:/",
-                            {
-                              "Get": "Parameters.TrainingBucket"
-                            },
-                            "white-castle",
-                            "deduplicated"
-                          ]
-                        }
-                      }
+                      "S3Uri": "s3://<replace-training-bucket>/white-castle/deduplicated"
                     }
                   }
                 ]
@@ -562,9 +449,7 @@
                   "VolumeSizeInGB": 30
                 }
               },
-              "RoleArn": {
-                "Get": "Parameters.SageMakerRoleArn"
-              }
+              "RoleArn": "<replace-with-sagemaker-role-arn>"
             },
             "Name": "EmbedAndDeduplicate",
             "Type": "Processing"
@@ -599,19 +484,7 @@
                     "LocalPath": "/opt/ml/processing/input/dataset",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
-                    "S3Uri": {
-                      "Std:Join": {
-                        "On": "/",
-                        "Values": [
-                          "s3:/",
-                          {
-                            "Get": "Parameters.TrainingBucket"
-                          },
-                          "white-castle",
-                          "deduplicated"
-                        ]
-                      }
-                    }
+                    "S3Uri": "s3://<replace-training-bucket>/white-castle/deduplicated"
                   }
                 },
                 {
@@ -620,18 +493,7 @@
                     "LocalPath": "/opt/ml/processing/input/code",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
-                    "S3Uri": {
-                      "Std:Join": {
-                        "On": "/",
-                        "Values": [
-                          "s3:/",
-                          {
-                            "Get": "Parameters.PipelineArtifactsBucket"
-                          },
-                          "code"
-                        ]
-                      }
-                    }
+                    "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/code"
                   }
                 }
               ],
@@ -642,19 +504,7 @@
                     "S3Output": {
                       "LocalPath": "/opt/ml/processing/output/dataset",
                       "S3UploadMode": "EndOfJob",
-                      "S3Uri": {
-                        "Std:Join": {
-                          "On": "/",
-                          "Values": [
-                            "s3:/",
-                            {
-                              "Get": "Parameters.TrainingBucket"
-                            },
-                            "white-castle",
-                            "quality"
-                          ]
-                        }
-                      }
+                      "S3Uri": "s3://<replace-training-bucket>/white-castle/quality"
                     }
                   },
                   {
@@ -662,19 +512,7 @@
                     "S3Output": {
                       "LocalPath": "/opt/ml/processing/output/metrics",
                       "S3UploadMode": "EndOfJob",
-                      "S3Uri": {
-                        "Std:Join": {
-                          "On": "/",
-                          "Values": [
-                            "s3:/",
-                            {
-                              "Get": "Parameters.PipelineArtifactsBucket"
-                            },
-                            "white-castle",
-                            "quality"
-                          ]
-                        }
-                      }
+                      "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/white-castle/quality"
                     }
                   }
                 ]
@@ -688,9 +526,7 @@
                   "VolumeSizeInGB": 30
                 }
               },
-              "RoleArn": {
-                "Get": "Parameters.SageMakerRoleArn"
-              }
+              "RoleArn": "<replace-with-sagemaker-role-arn>"
             },
             "Name": "KFoldCleanlabQuality",
             "PropertyFiles": [
@@ -760,19 +596,7 @@
                           "LocalPath": "/opt/ml/processing/input/dataset",
                           "S3DataType": "S3Prefix",
                           "S3InputMode": "File",
-                          "S3Uri": {
-                            "Std:Join": {
-                              "On": "/",
-                              "Values": [
-                                "s3:/",
-                                {
-                                  "Get": "Parameters.TrainingBucket"
-                                },
-                                "white-castle",
-                                "quality"
-                              ]
-                            }
-                          }
+                          "S3Uri": "s3://<replace-training-bucket>/white-castle/quality"
                         }
                       },
                       {
@@ -781,18 +605,7 @@
                           "LocalPath": "/opt/ml/processing/input/code",
                           "S3DataType": "S3Prefix",
                           "S3InputMode": "File",
-                          "S3Uri": {
-                            "Std:Join": {
-                              "On": "/",
-                              "Values": [
-                                "s3:/",
-                                {
-                                  "Get": "Parameters.PipelineArtifactsBucket"
-                                },
-                                "code"
-                              ]
-                            }
-                          }
+                          "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/code"
                         }
                       }
                     ],
@@ -803,19 +616,7 @@
                           "S3Output": {
                             "LocalPath": "/opt/ml/processing/output/metrics",
                             "S3UploadMode": "EndOfJob",
-                            "S3Uri": {
-                              "Std:Join": {
-                                "On": "/",
-                                "Values": [
-                                  "s3:/",
-                                  {
-                                    "Get": "Parameters.PipelineArtifactsBucket"
-                                  },
-                                  "white-castle",
-                                  "drift"
-                                ]
-                              }
-                            }
+                            "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/white-castle/drift"
                           }
                         }
                       ]
@@ -829,9 +630,7 @@
                         "VolumeSizeInGB": 30
                       }
                     },
-                    "RoleArn": {
-                      "Get": "Parameters.SageMakerRoleArn"
-                    }
+                    "RoleArn": "<replace-with-sagemaker-role-arn>"
                   },
                   "Name": "DetectDrift",
                   "PropertyFiles": [
@@ -896,19 +695,7 @@
                             "TrainingInputMode": "File"
                           },
                           "CheckpointConfig": {
-                            "S3Uri": {
-                              "Std:Join": {
-                                "On": "/",
-                                "Values": [
-                                  "s3:/",
-                                  {
-                                    "Get": "Parameters.ModelArtifactsBucket"
-                                  },
-                                  "white-castle",
-                                  "checkpoints"
-                                ]
-                              }
-                            }
+                            "S3Uri": "s3://<replace-model-artifacts-bucket>/white-castle/checkpoints"
                           },
                           "EnableManagedSpotTraining": {
                             "Get": "Parameters.UseSpot"
@@ -943,19 +730,7 @@
                                 "S3DataSource": {
                                   "S3DataDistributionType": "FullyReplicated",
                                   "S3DataType": "S3Prefix",
-                                  "S3Uri": {
-                                    "Std:Join": {
-                                      "On": "/",
-                                      "Values": [
-                                        "s3:/",
-                                        {
-                                          "Get": "Parameters.TrainingBucket"
-                                        },
-                                        "white-castle",
-                                        "quality"
-                                      ]
-                                    }
-                                  }
+                                  "S3Uri": "s3://<replace-training-bucket>/white-castle/quality"
                                 }
                               }
                             },
@@ -965,35 +740,13 @@
                                 "S3DataSource": {
                                   "S3DataDistributionType": "FullyReplicated",
                                   "S3DataType": "S3Prefix",
-                                  "S3Uri": {
-                                    "Std:Join": {
-                                      "On": "/",
-                                      "Values": [
-                                        "s3:/",
-                                        {
-                                          "Get": "Parameters.PipelineArtifactsBucket"
-                                        },
-                                        "code"
-                                      ]
-                                    }
-                                  }
+                                  "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/code"
                                 }
                               }
                             }
                           ],
                           "OutputDataConfig": {
-                            "S3OutputPath": {
-                              "Std:Join": {
-                                "On": "/",
-                                "Values": [
-                                  "s3:/",
-                                  {
-                                    "Get": "Parameters.ModelArtifactsBucket"
-                                  },
-                                  "white-castle"
-                                ]
-                              }
-                            }
+                            "S3OutputPath": "s3://<replace-model-artifacts-bucket>/white-castle"
                           },
                           "ResourceConfig": {
                             "InstanceCount": 1,
@@ -1002,9 +755,7 @@
                             },
                             "VolumeSizeInGB": 50
                           },
-                          "RoleArn": {
-                            "Get": "Parameters.SageMakerRoleArn"
-                          },
+                          "RoleArn": "<replace-with-sagemaker-role-arn>",
                           "StoppingCondition": {
                             "MaxRuntimeInSeconds": 86400,
                             "MaxWaitTimeInSeconds": 172800
@@ -1048,18 +799,7 @@
                                 "LocalPath": "/opt/ml/processing/input/model",
                                 "S3DataType": "S3Prefix",
                                 "S3InputMode": "File",
-                                "S3Uri": {
-                                  "Std:Join": {
-                                    "On": "/",
-                                    "Values": [
-                                      "s3:/",
-                                      {
-                                        "Get": "Parameters.ModelArtifactsBucket"
-                                      },
-                                      "white-castle"
-                                    ]
-                                  }
-                                }
+                                "S3Uri": "s3://<replace-model-artifacts-bucket>/white-castle"
                               }
                             },
                             {
@@ -1068,18 +808,7 @@
                                 "LocalPath": "/opt/ml/processing/input/code",
                                 "S3DataType": "S3Prefix",
                                 "S3InputMode": "File",
-                                "S3Uri": {
-                                  "Std:Join": {
-                                    "On": "/",
-                                    "Values": [
-                                      "s3:/",
-                                      {
-                                        "Get": "Parameters.PipelineArtifactsBucket"
-                                      },
-                                      "code"
-                                    ]
-                                  }
-                                }
+                                "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/code"
                               }
                             }
                           ],
@@ -1090,19 +819,7 @@
                                 "S3Output": {
                                   "LocalPath": "/opt/ml/processing/output/metrics",
                                   "S3UploadMode": "EndOfJob",
-                                  "S3Uri": {
-                                    "Std:Join": {
-                                      "On": "/",
-                                      "Values": [
-                                        "s3:/",
-                                        {
-                                          "Get": "Parameters.PipelineArtifactsBucket"
-                                        },
-                                        "white-castle",
-                                        "evaluation"
-                                      ]
-                                    }
-                                  }
+                                  "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/white-castle/evaluation"
                                 }
                               }
                             ]
@@ -1116,9 +833,7 @@
                               "VolumeSizeInGB": 30
                             }
                           },
-                          "RoleArn": {
-                            "Get": "Parameters.SageMakerRoleArn"
-                          }
+                          "RoleArn": "<replace-with-sagemaker-role-arn>"
                         },
                         "Name": "EvaluateModel",
                         "PropertyFiles": [
@@ -1229,20 +944,7 @@
                                   "ModelQuality": {
                                     "Statistics": {
                                       "ContentType": "application/json",
-                                      "S3Uri": {
-                                        "Std:Join": {
-                                          "On": "/",
-                                          "Values": [
-                                            "s3:/",
-                                            {
-                                              "Get": "Parameters.PipelineArtifactsBucket"
-                                            },
-                                            "white-castle",
-                                            "evaluation",
-                                            "metrics.json"
-                                          ]
-                                        }
-                                      }
+                                      "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/white-castle/evaluation/metrics.json"
                                     }
                                   }
                                 },

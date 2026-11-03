@@ -105,7 +105,6 @@ def test_eventbridge_trigger_starts_brand_pipeline(config: dict[str, Any]) -> No
     assert call["PipelineParameters"] == [
         {"Name": "BrandId", "Value": "brand-b"},
         {"Name": "TriggerSource", "Value": "s3"},
-        {"Name": "TrainingBucket", "Value": "training-bucket"},
     ]
     # Deterministic display name is attached so retries inside the throttle
     # window collide at SageMaker instead of starting duplicate GPU jobs.
