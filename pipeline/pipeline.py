@@ -118,9 +118,7 @@ def build_parameters(config: Mapping[str, Any], brand: Brand) -> list[dict[str, 
     selection = config["data_selection"]
     embedding = config["embedding"]
     kfold = config["kfold"]
-    cleanlab = config["cleanlab"]
     training = config["training"]
-    evaluation = config["evaluation"]
     drift = config["drift"]
     notifications = config["notifications"]
     local_mode = config["local_mode"]
@@ -1054,7 +1052,7 @@ def _validate_gate_right_values(definition: Mapping[str, Any]) -> None:
                     "Safety-critical thresholds must not be caller-overridable pipeline "
                     "parameters."
                 )
-            if isinstance(right_value, bool) or not isinstance(right_value, (int, float)):
+            if isinstance(right_value, bool) or not isinstance(right_value, int | float):
                 raise ValueError(
                     f"Gate {step_name!r} RightValue for {json_path!r} must be a number; "
                     f"got {right_value!r}"

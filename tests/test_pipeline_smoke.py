@@ -99,7 +99,7 @@ def test_safety_gate_right_values_are_literal_and_match_config() -> None:
             assert not isinstance(right, dict), (
                 f"Gate {name!r} RightValue must be a literal, not a reference: {right!r}"
             )
-            assert isinstance(right, (int, float)) and not isinstance(right, bool), (
+            assert isinstance(right, int | float) and not isinstance(right, bool), (
                 f"Gate {name!r} RightValue must be numeric: {right!r}"
             )
 
