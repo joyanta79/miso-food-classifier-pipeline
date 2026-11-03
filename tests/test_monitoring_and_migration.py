@@ -69,6 +69,9 @@ class DataSyncMock:
     def start_task_execution(self, *, TaskArn: str) -> dict[str, str]:
         return {"TaskExecutionArn": f"{TaskArn}/execution/1"}
 
+    def describe_task_execution(self, *, TaskExecutionArn: str) -> dict[str, Any]:
+        return {"TaskExecutionArn": TaskExecutionArn, "Status": "SUCCESS"}
+
 
 class S3HeadMock:
     def __init__(self, head: dict[str, str]) -> None:
