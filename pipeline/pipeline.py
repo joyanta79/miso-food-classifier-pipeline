@@ -339,7 +339,12 @@ def build_dry_run_definition(
             {
                 "InputName": "raw-archive",
                 "S3Input": {
-                    "S3Uri": _s3_uri(raw_archive_bucket, ""),
+                    # Scope the raw-archive input to this brand's prefix so a
+                    # cross-brand upload cannot be selected by this pipeline
+                    # (CWE-639). Upload credentials must likewise be scoped to
+                    # ``s3://<RawArchiveBucket>/<brand.id>/`` via an IAM policy
+                    # with an ``s3:prefix`` condition.
+                    "S3Uri": _s3_uri(raw_archive_bucket, brand.id),
                     "LocalPath": "/opt/ml/processing/input/raw",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",

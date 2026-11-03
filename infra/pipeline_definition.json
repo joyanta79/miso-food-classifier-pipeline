@@ -209,7 +209,7 @@
               "LocalPath": "/opt/ml/processing/input/raw",
               "S3DataType": "S3Prefix",
               "S3InputMode": "File",
-              "S3Uri": "s3://<replace-raw-archive-bucket>/"
+              "S3Uri": "s3://<replace-raw-archive-bucket>/white-castle"
             }
           },
           {

@@ -116,6 +116,15 @@ def build(
     images_uri: str,
     pipeline_name: str | None = None,
 ) -> Pipeline:
+    """Build the Miso SageMaker Pipeline for the first configured brand.
+
+    ``images_uri`` MUST point at this brand's dedicated raw-image prefix
+    (``s3://<raw-archive-bucket>/<brand.id>/``), not at the bucket root --
+    the step container only cross-checks the ``<brand>`` token in each
+    filename as defence in depth. Scope the upload credentials for the raw
+    archive to the same prefix (``s3:prefix`` IAM condition) to prevent
+    cross-brand data mixing (CWE-639).
+    """
     from pipeline.pipeline import get_brand  # noqa: WPS433 (lazy, see load_config)
 
     region = config["aws"]["region"]
@@ -499,7 +508,15 @@ def main() -> None:
     # Terraform-managed production pipeline.
     parser.add_argument("--config", required=True)
     parser.add_argument("--code-prefix", default="code")
-    parser.add_argument("--images-uri", required=True)
+    parser.add_argument(
+        "--images-uri",
+        required=True,
+        help=(
+            "S3 URI of the raw-image prefix for this brand, e.g. "
+            "s3://<raw-archive-bucket>/<brand.id>/. Must be scoped to a "
+            "single brand -- do not pass the bucket root (CWE-639)."
+        ),
+    )
     parser.add_argument(
         "--pipeline-name",
         default=None,
