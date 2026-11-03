@@ -660,9 +660,19 @@ def build_dry_run_definition(
         code_s3_uri,
         [
             {
+                # Mount only the exact training-job artifact (one model.tar.gz)
+                # that RegisterModel publishes, so the measured model and the
+                # registered model are guaranteed to be the same binary. Using
+                # the shared brand-wide prefix here would also mount every
+                # prior training job's output (and the checkpoints prefix),
+                # letting any writer of that prefix decide what the release
+                # gate measures. See validate_dry_run_definition's model-input
+                # pinning assertion for the invariant this depends on.
                 "InputName": "model-artifacts",
                 "S3Input": {
-                    "S3Uri": _s3_uri(model_artifacts_bucket, brand.id),
+                    "S3Uri": {
+                        "Get": "Steps.TrainBrandClassifier.ModelArtifacts.S3ModelArtifacts"
+                    },
                     "LocalPath": "/opt/ml/processing/input/model",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
@@ -1168,6 +1178,101 @@ def validate_dry_run_definition(
     status = register_step["Arguments"].get("ModelApprovalStatus")
     if status != "PendingManualApproval":
         raise ValueError("Registered models must remain PendingManualApproval")
+
+    _validate_evaluate_matches_register(definition, register_step)
+
+
+def _get_step_property_path(value: Any) -> str | None:
+    """Return the ``Steps.*`` property path a ``{"Get": "Steps.*"}`` reference
+    resolves to, or ``None`` if ``value`` is not such a reference.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    target = value.get("Get")
+    if not isinstance(target, str) or not target.startswith("Steps."):
+        return None
+    return target
+
+
+def _validate_evaluate_matches_register(
+    definition: Mapping[str, Any],
+    register_step: Mapping[str, Any],
+) -> None:
+    """Assert EvaluateModel's model input and RegisterModel's ModelDataUrl
+    resolve to the same training-step property.
+
+    If the two steps measure and register different artifacts, the release gate
+    is decoupled from what gets published (CWE-494). This check requires both
+    references to be a literal ``{"Get": "Steps.<Train>.ModelArtifacts.S3ModelArtifacts"}``
+    pointing at the same training step, so a bucket-prefix mount cannot be
+    silently reintroduced for EvaluateModel.
+    """
+    evaluate_step = next(
+        (
+            step
+            for step in _walk_steps(definition.get("Steps", []))
+            if step.get("Name") == "EvaluateModel"
+        ),
+        None,
+    )
+    if evaluate_step is None:
+        raise ValueError("Local DAG is missing required step: EvaluateModel")
+
+    processing_inputs = (
+        evaluate_step.get("Arguments", {}).get("ProcessingInputs", [])
+    )
+    model_inputs = [
+        entry
+        for entry in processing_inputs
+        if isinstance(entry, Mapping) and entry.get("InputName") == "model-artifacts"
+    ]
+    if len(model_inputs) != 1:
+        raise ValueError(
+            "EvaluateModel must declare exactly one 'model-artifacts' input; "
+            f"found {len(model_inputs)}"
+        )
+    eval_s3_uri = model_inputs[0].get("S3Input", {}).get("S3Uri")
+    eval_path = _get_step_property_path(eval_s3_uri)
+    if eval_path is None:
+        raise ValueError(
+            "EvaluateModel 'model-artifacts' S3Uri must be a step-property "
+            "reference of the form {'Get': 'Steps.<Train>.ModelArtifacts."
+            "S3ModelArtifacts'} so the evaluated artifact is pinned to the "
+            f"training-job output; found {eval_s3_uri!r}. Mounting a bucket "
+            "prefix here decouples the release gate from the registered model."
+        )
+
+    containers = (
+        register_step.get("Arguments", {})
+        .get("InferenceSpecification", {})
+        .get("Containers", [])
+    )
+    if not containers:
+        raise ValueError(
+            "RegisterModelPendingManualApproval must declare at least one "
+            "InferenceSpecification container with a ModelDataUrl."
+        )
+    register_path = _get_step_property_path(containers[0].get("ModelDataUrl"))
+    if register_path is None:
+        raise ValueError(
+            "RegisterModel ModelDataUrl must be a step-property reference of the "
+            "form {'Get': 'Steps.<Train>.ModelArtifacts.S3ModelArtifacts'}; found "
+            f"{containers[0].get('ModelDataUrl')!r}."
+        )
+
+    if eval_path != register_path:
+        raise ValueError(
+            "EvaluateModel's model input and RegisterModel's ModelDataUrl must "
+            "resolve to the same training-step property so the gate measures "
+            f"what gets registered; EvaluateModel={eval_path!r} vs "
+            f"RegisterModel={register_path!r}."
+        )
+    if not eval_path.endswith(".ModelArtifacts.S3ModelArtifacts"):
+        raise ValueError(
+            "EvaluateModel/RegisterModel must both reference "
+            "'Steps.<Train>.ModelArtifacts.S3ModelArtifacts'; got "
+            f"{eval_path!r}."
+        )
 
 
 # Policy-approved ranges for the safety-critical gate RightValues. These are
