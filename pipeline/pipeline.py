@@ -662,7 +662,17 @@ def build_dry_run_definition(
             {
                 "InputName": "model-artifacts",
                 "S3Input": {
-                    "S3Uri": _s3_uri(model_artifacts_bucket, brand.id),
+                    # Bind to the exact artifact produced by the current
+                    # training job (the single ``model.tar.gz`` object under
+                    # ``ModelArtifacts.S3ModelArtifacts``) instead of the whole
+                    # brand prefix. Mounting the whole prefix would let any
+                    # principal with ``s3:PutObject`` on the model-artifacts
+                    # bucket plant an arbitrary Keras artifact that
+                    # evaluation.py:_load_model would then deserialize with
+                    # execution-role credentials.
+                    "S3Uri": {
+                        "Get": "Steps.TrainBrandClassifier.ModelArtifacts.S3ModelArtifacts"
+                    },
                     "LocalPath": "/opt/ml/processing/input/model",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",

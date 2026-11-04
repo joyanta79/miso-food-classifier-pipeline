@@ -29,6 +29,7 @@ import os
 import sys
 import tarfile
 import time
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, "/opt/ml/processing/input/pkgcode/pipeline/steps")
@@ -151,19 +152,180 @@ def _positive_int(value, default: int) -> int:
         return default
 
 
+# The Keras loader is code-bearing for legacy HDF5 and SavedModel inputs
+# (Lambda layers are restored via ``marshal.loads``), and even the Keras v3
+# ``.keras`` archive can embed layer classes whose ``from_config`` executes
+# arbitrary code. The ``model-artifacts`` input is sourced from an S3 location
+# that is writable by any principal holding ``s3:PutObject`` on that bucket,
+# so the artifact must be treated as untrusted:
+#
+# * Load exactly one expected relative path (``model.keras``). Do not sniff
+#   candidate names, do not rglob the mount, do not fall back to HDF5 /
+#   SavedModel. train.py (training/train.py) only ever writes ``model.keras``.
+# * Validate the archive is a Keras v3 ZIP (``.keras``) with a well-formed
+#   ``config.json`` whose referenced layer classes are all on an allowlist
+#   of built-in Keras layers used by the brand classifier. Reject anything
+#   that mentions ``Lambda``/``TFOpLambda``/custom modules.
+# * Load with ``safe_mode=True`` and ``compile=False`` and without any
+#   ``custom_objects`` so the Keras-side guards against arbitrary callables
+#   remain armed.
+_EXPECTED_MODEL_FILENAME = "model.keras"
+_MAX_KERAS_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB cap on the archive
+_MAX_KERAS_CONFIG_BYTES = 16 * 1024 * 1024  # 16 MiB cap on config.json
+
+# Allowlist of Keras layer ``class_name`` values permitted in the archive's
+# ``config.json``. The brand classifier (training/train.py) uses an
+# EfficientNetV2 backbone with a small classification head; every layer class
+# the saved model can legitimately reference must appear here. Notably
+# ``Lambda`` and ``TFOpLambda`` are **not** allowed: those classes can embed
+# Python callables that execute at load time.
+_ALLOWED_LAYER_CLASS_NAMES = frozenset(
+    {
+        # Container / wrapper classes used in the saved config.
+        "Functional",
+        "Sequential",
+        "Model",
+        "InputLayer",
+        # Core / head layers.
+        "Dense",
+        "Dropout",
+        "Flatten",
+        "GlobalAveragePooling2D",
+        "GlobalMaxPooling2D",
+        "Activation",
+        "Rescaling",
+        "Normalization",
+        # Convolution / pooling layers used by EfficientNetV2.
+        "Conv2D",
+        "DepthwiseConv2D",
+        "SeparableConv2D",
+        "MaxPooling2D",
+        "AveragePooling2D",
+        "ZeroPadding2D",
+        "BatchNormalization",
+        "ReLU",
+        "Add",
+        "Multiply",
+        "Reshape",
+        "Concatenate",
+    }
+)
+
+# Layer class names that are explicitly forbidden regardless of allowlist
+# matching. Keeping these out of the allowlist is sufficient, but naming them
+# here makes the intent explicit and the rejection error precise.
+_FORBIDDEN_LAYER_CLASS_NAMES = frozenset({"Lambda", "TFOpLambda"})
+
+
+def _walk_class_names(node) -> "list[str]":
+    """Collect every ``class_name`` string found anywhere in a Keras config."""
+    found: list[str] = []
+    if isinstance(node, dict):
+        value = node.get("class_name")
+        if isinstance(value, str):
+            found.append(value)
+        for v in node.values():
+            found.extend(_walk_class_names(v))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(_walk_class_names(item))
+    return found
+
+
+def _validate_keras_archive(path: Path) -> None:
+    """Validate that ``path`` is a Keras v3 archive with an allowlisted config.
+
+    Raises ``ValueError`` with a precise reason if the archive is not a Keras
+    v3 ZIP, if it embeds unexpected members, if ``config.json`` is missing or
+    unparseable, or if it references a layer class outside the allowlist.
+    The archive is not opened by ``tf.keras.models.load_model`` until this
+    function returns successfully.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ValueError(f"cannot stat model artifact {path}: {exc}") from exc
+    if size <= 0 or size > _MAX_KERAS_ARCHIVE_BYTES:
+        raise ValueError(
+            f"model artifact {path} size {size} is outside the accepted range"
+        )
+    if not zipfile.is_zipfile(path):
+        raise ValueError(
+            f"model artifact {path} is not a Keras v3 archive (expected a .keras ZIP);"
+            " HDF5 and SavedModel inputs are rejected"
+        )
+    with zipfile.ZipFile(path) as archive:
+        names = archive.namelist()
+        if "config.json" not in names:
+            raise ValueError(
+                f"model artifact {path} is missing config.json; not a Keras v3 archive"
+            )
+        # Every member must be a regular, contained entry. ZipFile.extract would
+        # normalise paths, but we do not extract: we only read config.json for
+        # validation. Still, reject obviously malformed entries defensively.
+        for name in names:
+            if name.startswith("/") or ".." in name.replace("\\", "/").split("/"):
+                raise ValueError(
+                    f"model artifact {path} contains unsafe member name {name!r}"
+                )
+        info = archive.getinfo("config.json")
+        if info.file_size < 0 or info.file_size > _MAX_KERAS_CONFIG_BYTES:
+            raise ValueError(
+                f"model artifact {path} config.json size {info.file_size} exceeds cap"
+            )
+        with archive.open("config.json") as handle:
+            raw = handle.read(_MAX_KERAS_CONFIG_BYTES + 1)
+        if len(raw) > _MAX_KERAS_CONFIG_BYTES:
+            raise ValueError(
+                f"model artifact {path} config.json exceeds cap when decompressed"
+            )
+        try:
+            config = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"model artifact {path} config.json is not valid UTF-8 JSON: {exc}"
+            ) from exc
+    class_names = _walk_class_names(config)
+    if not class_names:
+        raise ValueError(
+            f"model artifact {path} config.json contained no class_name entries"
+        )
+    forbidden = sorted({c for c in class_names if c in _FORBIDDEN_LAYER_CLASS_NAMES})
+    if forbidden:
+        raise ValueError(
+            f"model artifact {path} references forbidden layer classes {forbidden!r};"
+            " refusing to load (code-bearing layer types are not permitted)"
+        )
+    unexpected = sorted({c for c in class_names if c not in _ALLOWED_LAYER_CLASS_NAMES})
+    if unexpected:
+        raise ValueError(
+            f"model artifact {path} references layer classes {unexpected!r} that are"
+            f" not on the allowlist; refusing to load"
+        )
+
+
 def _load_model(model_dir: Path):
+    """Load the training step's Keras v3 model artifact.
+
+    Only ``<model_dir>/model.keras`` is accepted (that is what
+    ``training/train.py`` writes). HDF5 (`.h5`), legacy SavedModel directories
+    and arbitrary ``rglob`` matches are rejected: those loaders are
+    code-bearing in the pinned ``tensorflow==2.14.1`` stack. Loading goes
+    through ``safe_mode=True`` with ``compile=False`` and no
+    ``custom_objects`` after the archive's ``config.json`` has been validated.
+    """
     import tensorflow as tf
 
-    # train.py saves either a SavedModel dir or model.keras; find it.
-    for candidate in ("model.keras", "1", "model"):
-        p = model_dir / candidate
-        if p.exists():
-            return tf.keras.models.load_model(p)
-    # Fall back: first loadable entry.
-    for p in sorted(model_dir.rglob("*")):
-        if p.name.endswith(".keras") or (p.is_dir() and (p / "saved_model.pb").exists()):
-            return tf.keras.models.load_model(p)
-    raise FileNotFoundError(f"No loadable model found under {model_dir}")
+    model_path = model_dir / _EXPECTED_MODEL_FILENAME
+    if not model_path.is_file():
+        raise FileNotFoundError(
+            f"expected single Keras v3 artifact at {model_path}; "
+            f"HDF5 and SavedModel inputs are not accepted"
+        )
+    _validate_keras_archive(model_path)
+    return tf.keras.models.load_model(
+        model_path, compile=False, safe_mode=True, custom_objects=None
+    )
 
 
 def main() -> None:
