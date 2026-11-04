@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path, PurePosixPath
@@ -25,6 +26,18 @@ from pathlib import Path, PurePosixPath
 sys.path.insert(0, "/opt/ml/input/data/pkgcode")
 
 from training.train import train_model  # noqa: E402
+
+# Defence-in-depth: labels reach this step via cleaned_dataset.json after
+# flowing through the selection -> embedding -> cleanlab pipeline. The upstream
+# selection step (pipeline/steps/data_selection.py) is the primary validator,
+# but any label that is used as a filesystem directory component here must
+# itself be a safe single path component, so this step rejects anything else.
+_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
+
+
+def _is_safe_label(label: object) -> bool:
+    """Return True when ``label`` is safe to use as a class directory name."""
+    return isinstance(label, str) and bool(_LABEL_PATTERN.fullmatch(label))
 
 
 def _dest_filename(record: dict) -> str:
@@ -47,9 +60,24 @@ def _prep_class_dirs(
 ) -> None:
     by_class: dict[str, list[dict]] = {}
     for record in cleaned:
-        by_class.setdefault(record["label"], []).append(record)
+        label = record["label"]
+        # Defence-in-depth against CWE-22: refuse any label that is not a
+        # strict single safe path component. Upstream data_selection.select()
+        # already enforces this allow-list, but revalidating here means a
+        # cleaned_dataset.json produced by any other path (manual edit,
+        # legacy manifest, future refactor) cannot smuggle ``.``, ``..``,
+        # empty strings, separators or control characters into a filesystem
+        # path and escape the prepared class-directory tree.
+        if not _is_safe_label(label):
+            raise ValueError(
+                f"[train_step] refusing to use unsafe label {label!r} as a "
+                "class directory component; expected a single path segment "
+                "matching ^[A-Za-z0-9][A-Za-z0-9-]{0,63}$."
+            )
+        by_class.setdefault(label, []).append(record)
     train_root = work / "train"
     val_root = work / "validation"
+    work_resolved = work.resolve()
     copied_counts: dict[str, int] = {}
     for label, records in by_class.items():
         records = sorted(records, key=lambda r: r["image_path"])
@@ -59,6 +87,17 @@ def _prep_class_dirs(
         label_copied = 0
         for split_root, split in ((train_root, train), (val_root, val)):
             dest = split_root / label
+            # Containment check: even with a validated label, assert that the
+            # resolved destination stays under ``work``. This guards against
+            # symlink or future-code surprises in the staging tree.
+            try:
+                dest.resolve().relative_to(work_resolved)
+            except ValueError as exc:
+                raise ValueError(
+                    f"[train_step] destination {dest} for label {label!r} "
+                    f"escapes the staging root {work_resolved}; refusing to "
+                    "materialise the training set."
+                ) from exc
             dest.mkdir(parents=True, exist_ok=True)
             for record in split:
                 src = images_root / record["image_path"]
