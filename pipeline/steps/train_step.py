@@ -18,9 +18,55 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path, PurePosixPath
+
+# Labels become filesystem directory components, so they must be strict,
+# single-segment names. The regex requires an alphanumeric leading character
+# and allows only [A-Za-z0-9._-] afterwards; '.'/'..' are rejected explicitly
+# below because they would collapse to the parent directory. Anything with a
+# path separator or that is absolute is also rejected before the regex check.
+_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _validate_label(label: object) -> str:
+    """Return ``label`` if it is a safe single-segment directory component.
+
+    Raises ``ValueError`` otherwise. The manifest field is attacker-
+    controllable (see cleaned_dataset.json rewrite), so it must not be used
+    as a path component without this check.
+    """
+    if not isinstance(label, str) or not label:
+        raise ValueError(f"[train_step] manifest label must be a non-empty string: {label!r}")
+    if label in (".", ".."):
+        raise ValueError(f"[train_step] manifest label {label!r} is a reserved path component")
+    if os.path.isabs(label) or "/" in label or "\\" in label or "\x00" in label:
+        raise ValueError(
+            f"[train_step] manifest label {label!r} contains a path separator or is absolute"
+        )
+    if not _LABEL_RE.match(label):
+        raise ValueError(
+            f"[train_step] manifest label {label!r} does not match ^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        )
+    return label
+
+
+def _assert_within(child: Path, root: Path) -> str:
+    """Resolve ``child`` and ``root`` and require ``child`` to stay inside ``root``.
+
+    Returns the resolved real path of ``child`` on success. Raises
+    ``ValueError`` when the resolution escapes ``root`` (via '..', symlinks,
+    or an absolute component swallowing the join).
+    """
+    root_real = os.path.realpath(root)
+    child_real = os.path.realpath(child)
+    if child_real != root_real and not child_real.startswith(root_real + os.sep):
+        raise ValueError(
+            f"[train_step] path {child!r} resolves to {child_real!r}, outside {root_real!r}"
+        )
+    return child_real
 
 sys.path.insert(0, "/opt/ml/input/data/pkgcode")
 
@@ -45,20 +91,38 @@ def _dest_filename(record: dict) -> str:
 def _prep_class_dirs(
     images_root: Path, cleaned: list[dict], work: Path, val_fraction: float = 0.2
 ) -> None:
+    # Group records by their validated label. Rejecting the whole run on an
+    # invalid label (rather than skipping) matches the fail-closed posture of
+    # the surrounding code: the selection gate was computed over the full
+    # manifest, so silently dropping records would diverge from it.
     by_class: dict[str, list[dict]] = {}
     for record in cleaned:
-        by_class.setdefault(record["label"], []).append(record)
+        label = _validate_label(record.get("label"))
+        by_class.setdefault(label, []).append(record)
+    work.mkdir(parents=True, exist_ok=True)
+    work_real = os.path.realpath(work)
     train_root = work / "train"
     val_root = work / "validation"
-    copied_counts: dict[str, int] = {}
+    train_root.mkdir(parents=True, exist_ok=True)
+    val_root.mkdir(parents=True, exist_ok=True)
+    # Ensure the split roots themselves are inside work (defence in depth; they
+    # are constructed from a literal join above, but a future refactor could
+    # change that).
+    _assert_within(train_root, work_real)
+    _assert_within(val_root, work_real)
+
+    expected_dests: set[str] = set()
+    copied_dests: set[str] = set()
     for label, records in by_class.items():
         records = sorted(records, key=lambda r: r["image_path"])
         n_val = max(1, int(len(records) * val_fraction))
         val = records[:n_val]
         train = records[n_val:] or records  # never leave train empty
-        label_copied = 0
         for split_root, split in ((train_root, train), (val_root, val)):
             dest = split_root / label
+            # Re-check containment against ``work`` after the join: validated
+            # labels cannot traverse, but this is the invariant we rely on.
+            dest_real = _assert_within(dest, work_real)
             dest.mkdir(parents=True, exist_ok=True)
             for record in split:
                 src = images_root / record["image_path"]
@@ -74,15 +138,32 @@ def _prep_class_dirs(
                 # Derive the destination filename from a unique record id so
                 # two records with the same basename (e.g. a/x.jpg and b/x.jpg)
                 # do not overwrite each other in the prepared class dir.
-                shutil.copy(src, dest / _dest_filename(record))
-                label_copied += 1
-        copied_counts[label] = label_copied
-    manifest_counts = {label: len(records) for label, records in by_class.items()}
-    if copied_counts != manifest_counts:
+                target = dest / _dest_filename(record)
+                # Containment check for the final file path too: the filename
+                # is a sha1 digest + suffix today, but keep the guarantee
+                # independent of _dest_filename's implementation details.
+                target_real = os.path.realpath(target)
+                if not target_real.startswith(dest_real + os.sep):
+                    raise ValueError(
+                        f"[train_step] record {record.get('id', record['image_path'])!r} "
+                        f"resolves to {target_real!r}, outside class dir {dest_real!r}"
+                    )
+                expected_dests.add(target_real)
+                shutil.copy(src, target)
+                copied_dests.add(target_real)
+    if copied_dests != expected_dests:
         raise RuntimeError(
-            "[train_step] copied-file counts do not match manifest counts: "
-            f"manifest={manifest_counts} copied={copied_counts}"
+            "[train_step] copied destinations do not match expected destinations: "
+            f"missing={sorted(expected_dests - copied_dests)} "
+            f"extra={sorted(copied_dests - expected_dests)}"
         )
+    copied_counts = {label: 0 for label in by_class}
+    for path in copied_dests:
+        # Attribute each copied destination to its class dir for the summary
+        # log; the invariant above has already asserted set equality.
+        parent = os.path.basename(os.path.dirname(path))
+        if parent in copied_counts:
+            copied_counts[parent] += 1
     print(f"[train_step] prepared class dirs: {copied_counts}")
 
 
