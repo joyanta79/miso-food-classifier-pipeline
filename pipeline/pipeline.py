@@ -58,6 +58,21 @@ def load_config(config_path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]
         raise ValueError(f"config.yaml is missing required sections: {sorted(missing)}")
     if not config["brands"]:
         raise ValueError("config.yaml must define at least one brand")
+    # The evaluation sample-coverage floors feed safety-critical conditions in
+    # EvaluateModelQualityGate (sample_count / done_sample_count /
+    # not_done_sample_count). Require them explicitly so an omitted key cannot
+    # silently default to a floor of 1 at any build site.
+    evaluation = config["evaluation"] or {}
+    missing_eval = [
+        key
+        for key in ("min_sample_count", "min_per_class_count")
+        if key not in evaluation
+    ]
+    if missing_eval:
+        raise ValueError(
+            "config.yaml evaluation section missing required keys: "
+            f"{sorted(missing_eval)}"
+        )
     _validate_drift_config(config["drift"])
     return config
 
@@ -699,10 +714,10 @@ def build_dry_run_definition(
                 config["evaluation"].get("not_done_label", "not_done")
             ),
             "MIN_SAMPLE_COUNT": _literal_env_value(
-                int(config["evaluation"].get("min_sample_count", 1))
+                int(config["evaluation"]["min_sample_count"])
             ),
             "MIN_PER_CLASS_COUNT": _literal_env_value(
-                int(config["evaluation"].get("min_per_class_count", 1))
+                int(config["evaluation"]["min_per_class_count"])
             ),
         },
         [
@@ -814,21 +829,21 @@ def build_dry_run_definition(
                     "LeftValue": _step_ref(
                         "EvaluateModel", "EvaluationMetrics", "sample_count"
                     ),
-                    "RightValue": int(config["evaluation"].get("min_sample_count", 1)),
+                    "RightValue": int(config["evaluation"]["min_sample_count"]),
                 },
                 {
                     "Type": "ConditionGreaterThanOrEqualTo",
                     "LeftValue": _step_ref(
                         "EvaluateModel", "EvaluationMetrics", "not_done_sample_count"
                     ),
-                    "RightValue": int(config["evaluation"].get("min_per_class_count", 1)),
+                    "RightValue": int(config["evaluation"]["min_per_class_count"]),
                 },
                 {
                     "Type": "ConditionGreaterThanOrEqualTo",
                     "LeftValue": _step_ref(
                         "EvaluateModel", "EvaluationMetrics", "done_sample_count"
                     ),
-                    "RightValue": int(config["evaluation"].get("min_per_class_count", 1)),
+                    "RightValue": int(config["evaluation"]["min_per_class_count"]),
                 },
                 {
                     "Type": "ConditionLessThanOrEqualTo",
@@ -1175,20 +1190,75 @@ def validate_dry_run_definition(
 # the ultimate backstop against a definition-build-time overlay accidentally (or
 # maliciously) relaxing a safety gate even when the gate is now a literal rather
 # than an execution parameter.
+# Policy-approved ranges for the safety-critical gate RightValues. These are
+# inclusive bounds that any brand-overlay configuration must stay within. The
+# lower (for ``ge``) and upper (for ``le``) bounds are aligned with the declared
+# production floors in ``pipeline/deploy_pipeline.py::PRODUCTION_GATE_FLOORS``.
+# Every Condition emitted by the builders MUST have a policy entry here;
+# ``_validate_gate_right_values`` fails closed on any (step, path, comparator)
+# triple that is not represented.
 _GATE_RIGHT_VALUE_POLICY: dict[tuple[str, str, str], tuple[float, float]] = {
-    ("EvaluateModelQualityGate", "accuracy", "ConditionGreaterThanOrEqualTo"): (0.90, 1.0),
+    # Accuracy / FP-rate / latency floors come from PRODUCTION_GATE_FLOORS.
+    ("EvaluateModelQualityGate", "accuracy", "ConditionGreaterThanOrEqualTo"): (0.97, 1.0),
     (
         "EvaluateModelQualityGate",
         "emergency_false_positive_rate",
         "ConditionLessThanOrEqualTo",
-    ): (0.0, 0.10),
-    ("EvaluateModelQualityGate", "latency_ms", "ConditionLessThanOrEqualTo"): (1.0, 5_000.0),
-    ("DriftGate", "confidence", "ConditionGreaterThanOrEqualTo"): (0.50, 1.0),
+    ): (0.0, 0.05),
+    ("EvaluateModelQualityGate", "latency_ms", "ConditionLessThanOrEqualTo"): (1.0, 1_000.0),
+    # Evaluation-coverage conditions: sample_count must satisfy the production
+    # target_dataset_min floor's /60-ish scale (evaluation samples are a subset
+    # of the dataset). We require at least the configured production
+    # min_sample_count=100 / min_per_class_count=50 and never below.
+    ("EvaluateModelQualityGate", "sample_count", "ConditionGreaterThanOrEqualTo"): (
+        100.0,
+        1_000_000.0,
+    ),
+    (
+        "EvaluateModelQualityGate",
+        "not_done_sample_count",
+        "ConditionGreaterThanOrEqualTo",
+    ): (50.0, 1_000_000.0),
+    (
+        "EvaluateModelQualityGate",
+        "done_sample_count",
+        "ConditionGreaterThanOrEqualTo",
+    ): (50.0, 1_000_000.0),
+    # missing_images must stay at exactly 0: any missing image invalidates the
+    # evaluation. ``ConditionLessThanOrEqualTo`` with RightValue=0 is the
+    # intended production literal.
+    ("EvaluateModelQualityGate", "missing_images", "ConditionLessThanOrEqualTo"): (0.0, 0.0),
+    # Drift gate: Level-1 confidence floor must stay at the production 0.65 or
+    # higher; correction-rate multiplier must stay within an operationally sane
+    # band.
+    ("DriftGate", "confidence", "ConditionGreaterThanOrEqualTo"): (0.65, 1.0),
     ("DriftGate", "correction_rate_multiplier", "ConditionLessThanOrEqualTo"): (1.0, 10.0),
-    ("CleanlabQualityGate", "flagged_fraction", "ConditionLessThanOrEqualTo"): (0.0, 0.10),
-    ("DatasetBoundsGate", "dataset_size:min", "ConditionGreaterThanOrEqualTo"): (1.0, 1_000_000.0),
-    ("DatasetBoundsGate", "dataset_size:max", "ConditionLessThanOrEqualTo"): (1.0, 10_000_000.0),
-    ("DatasetBoundsGate", "minimum_class_count", "ConditionGreaterThanOrEqualTo"): (1.0, 100_000.0),
+    # CleanLab quality: flagged_fraction cap is the production 0.05.
+    ("CleanlabQualityGate", "flagged_fraction", "ConditionLessThanOrEqualTo"): (0.0, 0.05),
+    # CleanLab post-filter dataset-coverage conditions share the same floors as
+    # DatasetBoundsGate (``target_dataset_min`` / ``min_images_per_class``).
+    ("CleanlabQualityGate", "cleaned_count", "ConditionGreaterThanOrEqualTo"): (
+        6_000.0,
+        1_000_000.0,
+    ),
+    ("CleanlabQualityGate", "minimum_class_count", "ConditionGreaterThanOrEqualTo"): (
+        500.0,
+        100_000.0,
+    ),
+    # Dataset bounds: production floors are target_dataset_min=6000 and
+    # min_images_per_class=500.
+    ("DatasetBoundsGate", "dataset_size:min", "ConditionGreaterThanOrEqualTo"): (
+        6_000.0,
+        1_000_000.0,
+    ),
+    ("DatasetBoundsGate", "dataset_size:max", "ConditionLessThanOrEqualTo"): (
+        1.0,
+        10_000_000.0,
+    ),
+    ("DatasetBoundsGate", "minimum_class_count", "ConditionGreaterThanOrEqualTo"): (
+        500.0,
+        100_000.0,
+    ),
 }
 
 
@@ -1240,9 +1310,14 @@ def _validate_gate_right_values(definition: Mapping[str, Any]) -> None:
                     f"got {right_value!r}"
                 )
             if json_path is None:
-                # Unknown shape; still require a numeric literal (already checked) but
-                # skip range enforcement.
-                continue
+                # No recognisable Std:JsonGet LeftValue path. Every emitted gate
+                # condition uses _step_ref/JsonGet, so an unknown shape here is
+                # either a builder bug or a tampered definition -- fail closed.
+                raise ValueError(
+                    f"Gate {step_name!r} condition is missing a Std:JsonGet "
+                    f"LeftValue path (type={condition_type!r}); refusing to "
+                    "range-enforce an opaque safety gate."
+                )
             lookup_path = json_path
             if step_name == "DatasetBoundsGate" and json_path == "dataset_size":
                 occurrences[(step_name, json_path)] = occurrences.get((step_name, json_path), 0) + 1
@@ -1251,9 +1326,16 @@ def _validate_gate_right_values(definition: Mapping[str, Any]) -> None:
             key = (step_name, lookup_path, condition_type)
             policy = _GATE_RIGHT_VALUE_POLICY.get(key)
             if policy is None:
-                # No policy declared for this gate/path/comparator -- leave the literal
-                # check in place but do not range-enforce.
-                continue
+                # Fail closed: any Condition the builders emit must have an
+                # explicit policy entry. An unknown (step, path, comparator)
+                # triple means the backstop does not cover it, which is
+                # precisely how a weakened threshold can slip through.
+                raise ValueError(
+                    f"Gate {step_name!r} condition for {json_path!r} "
+                    f"({condition_type}) has no policy entry in "
+                    "_GATE_RIGHT_VALUE_POLICY. Add an explicit range so the "
+                    "backstop can enforce it."
+                )
             low, high = policy
             if not (low <= float(right_value) <= high):
                 raise ValueError(
@@ -1492,7 +1574,7 @@ def build_sagemaker_pipeline(
                     property_file=evaluation_report,
                     json_path="sample_count",
                 ),
-                right=int(evaluation.get("min_sample_count", 1)),
+                right=int(evaluation["min_sample_count"]),
             ),
             ConditionGreaterThanOrEqualTo(
                 left=JsonGet(
@@ -1500,7 +1582,7 @@ def build_sagemaker_pipeline(
                     property_file=evaluation_report,
                     json_path="not_done_sample_count",
                 ),
-                right=int(evaluation.get("min_per_class_count", 1)),
+                right=int(evaluation["min_per_class_count"]),
             ),
             ConditionGreaterThanOrEqualTo(
                 left=JsonGet(
@@ -1508,7 +1590,7 @@ def build_sagemaker_pipeline(
                     property_file=evaluation_report,
                     json_path="done_sample_count",
                 ),
-                right=int(evaluation.get("min_per_class_count", 1)),
+                right=int(evaluation["min_per_class_count"]),
             ),
             ConditionLessThanOrEqualTo(
                 left=JsonGet(
