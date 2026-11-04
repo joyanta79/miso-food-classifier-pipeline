@@ -438,6 +438,16 @@ def build_dry_run_definition(
             "TARGET_DATASET_MAX": _literal_env_value(
                 config["data_selection"]["target_dataset_max"]
             ),
+            # The configured safety labels are injected as literals so an
+            # uploader cannot invent new training classes via the object
+            # name: ``_parse_name`` only admits records whose parsed label
+            # is in this allowlist (see pipeline/steps/data_selection.py).
+            "DONE_LABEL": _literal_env_value(
+                config["evaluation"].get("done_label", "done")
+            ),
+            "NOT_DONE_LABEL": _literal_env_value(
+                config["evaluation"].get("not_done_label", "not_done")
+            ),
         },
         [
             {
@@ -1374,6 +1384,11 @@ def build_sagemaker_pipeline(
             "NAMING_PATTERN": brand.naming_pattern,
             "RECENCY_MONTHS": str(config["data_selection"]["recency_months"]),
             "MIN_IMAGES_PER_CLASS": str(config["data_selection"]["min_images_per_class"]),
+            # Label allowlist for the data-selection step. Only filenames
+            # whose parsed label matches one of these configured classes
+            # are admitted to the curated manifest.
+            "DONE_LABEL": str(config["evaluation"].get("done_label", "done")),
+            "NOT_DONE_LABEL": str(config["evaluation"].get("not_done_label", "not_done")),
         },
         selection_report,
     )

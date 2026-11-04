@@ -40,26 +40,61 @@ import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
+
+# Match the sys.path layout the other pipeline steps use so this step can
+# share ``processing.step0_data_selection.parse_filename_metadata`` -- the
+# single, strict grammar for ``<brand>_<label>_<confidence>.<ext>``.
+sys.path.insert(0, "/opt/ml/processing/input/pkgcode")
+sys.path.insert(0, "/opt/ml/processing/input/pkgcode/pipeline/steps")
+
+try:  # pragma: no cover - import side effect depends on container layout
+    from processing.step0_data_selection import (  # noqa: E402
+        parse_filename_metadata as _parse_filename_metadata,
+    )
+except Exception:  # pragma: no cover - fall back for local test contexts
+    import re as _re
+
+    _METADATA_PATTERN = _re.compile(
+        r"^(?P<brand>[^_]+)_(?P<label>.+)_(?P<confidence>\d+(?:\.\d+)?)$"
+    )
+
+    def _parse_filename_metadata(key: str) -> tuple[str, str, float]:
+        stem = Path(key).stem
+        match = _METADATA_PATTERN.match(stem)
+        if not match:
+            raise ValueError(
+                f"Image key does not match brand_label_confidence format: {key}"
+            )
+        return (
+            match.group("brand"),
+            match.group("label"),
+            float(match.group("confidence")),
+        )
+
 
 UTC = timezone.utc
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 _WILDCARD_CHARS = frozenset("*?[")
 
 
-def _parse_name(path: Path) -> tuple[str, str, str] | None:
+def _parse_name(path: Path) -> tuple[str, str, float] | None:
     """Return ``(brand, label, confidence)`` from ``brand_label_confidence.ext``.
 
-    Returns ``None`` when the filename does not match the expected scheme.
+    Uses the shared strict grammar from
+    ``processing.step0_data_selection.parse_filename_metadata`` so the label
+    keeps its underscores (``wc_not_done_0.93.jpg`` -> label ``not_done``) and
+    the confidence must be numeric. Returns ``None`` when the filename does
+    not match the expected scheme instead of silently reconstructing fields.
     """
-    stem = path.stem
-    parts = stem.split("_")
-    if len(parts) < 3:
+    try:
+        brand, label, confidence = _parse_filename_metadata(path.name)
+    except ValueError:
         return None
-    # brand = parts[0]; confidence = parts[-1]; label = everything between.
-    brand = parts[0]
-    label = "".join(parts[1:-1])
-    confidence = parts[-1]
+    # Enforce the documented [0, 1] confidence range so out-of-band values
+    # (e.g. ``wc_label_1234567.jpg`` -> 1234567.0) are rejected at the edge.
+    if not (0.0 <= confidence <= 1.0):
+        return None
     return brand, label, confidence
 
 
@@ -85,6 +120,20 @@ def _expected_brand_token(naming_pattern: str) -> str:
 
 
 
+def _normalise_label_allowlist(
+    labels: Iterable[str] | None,
+) -> frozenset[str] | None:
+    """Return the de-duplicated, non-empty label allowlist (or ``None``).
+
+    ``None`` disables allowlist enforcement; an empty iterable is treated as
+    "no labels are permitted" so operator misconfiguration is fail-closed.
+    """
+    if labels is None:
+        return None
+    cleaned = {label.strip() for label in labels if label and label.strip()}
+    return frozenset(cleaned)
+
+
 def select(
     image_root: Path,
     naming_pattern: str,
@@ -93,6 +142,7 @@ def select(
     min_images_per_class: int,
     target_dataset_min: int,
     target_dataset_max: int,
+    label_allowlist: Iterable[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Build the curated manifest and selection metrics for one brand.
 
@@ -118,6 +168,8 @@ def select(
             "be mixed into this brand's dataset."
         )
 
+    allowlist = _normalise_label_allowlist(label_allowlist)
+
     manifest: list[dict[str, Any]] = []
     label_counts: Counter[str] = Counter()
     for path in sorted(image_root.rglob("*")):
@@ -134,6 +186,12 @@ def select(
         # configured naming pattern -- otherwise an uploader who guesses
         # another brand's convention can poison this brand's dataset.
         if brand != expected_brand:
+            continue
+        # Enforce the operator-configured label allowlist (e.g. the
+        # ``done`` / ``not_done`` labels referenced by the evaluation gate).
+        # Filenames whose label is not in the allowlist are dropped so an
+        # uploader cannot invent new training classes via the object name.
+        if allowlist is not None and label not in allowlist:
             continue
         # Record the path relative to ``image_root`` as a POSIX string so that
         # discovery (``rglob``) and resolution (``images_root / image_path``)
@@ -181,6 +239,22 @@ def main() -> None:
     # processing/step0_data_selection.py and lambdas/handlers.py.
     naming_pattern = os.environ.get("NAMING_PATTERN", "").strip()
     brand_id = os.environ.get("BRAND_ID", "").strip()
+    # Build the label allowlist from the configured done/not_done labels.
+    # ``LABEL_ALLOWLIST`` (comma-separated) may extend the pair if an
+    # operator provisions additional classes. Fail-closed when neither is set.
+    allowlist_tokens: list[str] = []
+    done_label = os.environ.get("DONE_LABEL", "").strip()
+    not_done_label = os.environ.get("NOT_DONE_LABEL", "").strip()
+    if done_label:
+        allowlist_tokens.append(done_label)
+    if not_done_label:
+        allowlist_tokens.append(not_done_label)
+    extra = os.environ.get("LABEL_ALLOWLIST", "").strip()
+    if extra:
+        allowlist_tokens.extend(token.strip() for token in extra.split(","))
+    label_allowlist: list[str] | None = (
+        [token for token in allowlist_tokens if token] if allowlist_tokens else None
+    )
     if not naming_pattern:
         print(
             "[data_selection] FATAL: NAMING_PATTERN env var is empty or unset; "
@@ -201,6 +275,15 @@ def main() -> None:
     target_dataset_min = int(os.environ.get("TARGET_DATASET_MIN", "40"))
     target_dataset_max = int(os.environ.get("TARGET_DATASET_MAX", "50000"))
 
+    if label_allowlist is None:
+        print(
+            "[data_selection] FATAL: no label allowlist configured; set "
+            "DONE_LABEL / NOT_DONE_LABEL (and optionally LABEL_ALLOWLIST) "
+            "so an uploader cannot invent training classes via filename.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
     manifest, metrics = select(
         Path(args.images),
         naming_pattern,
@@ -208,6 +291,7 @@ def main() -> None:
         min_images_per_class=min_images_per_class,
         target_dataset_min=target_dataset_min,
         target_dataset_max=target_dataset_max,
+        label_allowlist=label_allowlist,
     )
 
     dataset_out = Path(args.dataset_out)
