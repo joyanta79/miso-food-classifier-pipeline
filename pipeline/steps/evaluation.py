@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 import tarfile
 import time
@@ -115,6 +116,48 @@ def _safe_extract_tar(handle: tarfile.TarFile, dest: Path) -> None:
 # <= FpRateEmergencyThreshold). Written whenever the step aborts fail-closed.
 _FAIL_ACCURACY = 0.0
 _FAIL_FP_RATE = 1.0
+
+# Allowed image suffixes for manifest-supplied paths. The manifest comes from an
+# S3 prefix that any in-account principal with s3:PutObject can rewrite, so an
+# attacker-controlled ``image_path`` must not be able to redirect ``Image.open``
+# at arbitrary (potentially non-image) files in the container.
+_ALLOWED_IMAGE_SUFFIXES = frozenset(
+    {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
+)
+
+
+def _safe_resolve_image_path(images_root: Path, image_path: str) -> Path:
+    """Resolve ``image_path`` under ``images_root`` with full containment.
+
+    Reuses the same policy ``_safe_extract_tar`` applies to tarball members:
+
+    * reject non-string / empty / absolute values;
+    * reject any ``..`` component in the normalized path;
+    * require ``os.path.realpath(images_root / image_path)`` to stay inside
+      ``os.path.realpath(images_root)``.
+
+    Raises :class:`ValueError` describing the containment violation on failure;
+    callers translate that into a gate-failing ``_abort`` so the release gate
+    cannot be fed metrics computed from files outside the images channel.
+    """
+    if not isinstance(image_path, str) or not image_path:
+        raise ValueError(f"image_path must be a non-empty string, got {image_path!r}")
+    # Reject absolute paths; pathlib's ``/`` operator would otherwise discard
+    # ``images_root`` entirely for an absolute right-hand operand.
+    if image_path.startswith("/") or os.path.isabs(image_path):
+        raise ValueError(f"image_path is absolute: {image_path!r}")
+    normalized = os.path.normpath(image_path)
+    if normalized.startswith("..") or any(
+        part == ".." for part in image_path.replace("\\", "/").split("/")
+    ):
+        raise ValueError(f"image_path escapes images channel: {image_path!r}")
+    root_real = os.path.realpath(images_root)
+    target_real = os.path.realpath(os.path.join(root_real, image_path))
+    if target_real != root_real and not target_real.startswith(root_real + os.sep):
+        raise ValueError(
+            f"image_path resolves outside images channel: {image_path!r}"
+        )
+    return Path(target_real)
 
 
 def _write_metrics(metrics_out: Path, metrics: dict) -> None:
@@ -253,12 +296,66 @@ def main() -> None:
     missing_images = 0
     latencies: list[float] = []
     for record in cleaned:
-        path = images_root / record["image_path"]
-        if not path.exists():
+        raw_image_path = record.get("image_path")
+        try:
+            path = _safe_resolve_image_path(images_root, raw_image_path)
+        except ValueError as exc:
+            _abort(
+                metrics_out,
+                (
+                    f"cleaned_dataset record image_path failed containment check: {exc}; "
+                    f"refusing to evaluate manifest-supplied paths that escape the images channel."
+                ),
+                {
+                    "classes": labels_sorted,
+                    "sample_count": total,
+                    "not_done_sample_count": not_done_evaluated,
+                    "done_sample_count": done_evaluated,
+                    "missing_images": missing_images,
+                },
+            )
+        # Reject anything that isn't a plain regular file. ``lstat`` is used so a
+        # symlink inside the images channel cannot redirect the open at a file
+        # outside the channel between the realpath check and ``Image.open``.
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
             # Count missing files instead of silently dropping records; the step
             # aborts below when missing_images > 0.
             missing_images += 1
             continue
+        if not stat.S_ISREG(st.st_mode):
+            _abort(
+                metrics_out,
+                (
+                    f"cleaned_dataset record image_path {raw_image_path!r} is not a regular "
+                    f"file (mode={stat.filemode(st.st_mode)}); refusing to open symlinks or "
+                    f"non-regular files from the images channel."
+                ),
+                {
+                    "classes": labels_sorted,
+                    "sample_count": total,
+                    "not_done_sample_count": not_done_evaluated,
+                    "done_sample_count": done_evaluated,
+                    "missing_images": missing_images,
+                },
+            )
+        if path.suffix.lower() not in _ALLOWED_IMAGE_SUFFIXES:
+            _abort(
+                metrics_out,
+                (
+                    f"cleaned_dataset record image_path {raw_image_path!r} has disallowed "
+                    f"suffix {path.suffix!r}; allowed suffixes are "
+                    f"{sorted(_ALLOWED_IMAGE_SUFFIXES)!r}."
+                ),
+                {
+                    "classes": labels_sorted,
+                    "sample_count": total,
+                    "not_done_sample_count": not_done_evaluated,
+                    "done_sample_count": done_evaluated,
+                    "missing_images": missing_images,
+                },
+            )
         with Image.open(path) as handle:
             arr = np.asarray(
                 handle.convert("RGB").resize((image_size, image_size)), dtype=np.float32
