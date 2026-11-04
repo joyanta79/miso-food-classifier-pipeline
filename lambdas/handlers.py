@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from collections.abc import Iterable
@@ -16,6 +17,93 @@ from typing import Any
 from urllib.parse import unquote_plus
 
 import yaml
+
+# ---------------------------------------------------------------------------
+# Audit logging
+#
+# Every security-relevant decision in this module (authentication failure,
+# authorization denial, brand acceptance/rejection, successful
+# ``start_pipeline_execution`` and idempotency/in-flight suppression) emits a
+# single structured JSON log record through this logger. The records are
+# consumed by a CloudWatch metric filter (``infra/observability.tf``) that
+# alarms on repeated authorization denials per principal and by CloudTrail +
+# S3 server-access logging so uploads driving ``s3_trigger_handler`` are
+# attributable.
+#
+# Only non-sensitive claim fields are logged (principal id and the resolved
+# brand entitlement set); raw tokens, email addresses and other PII are never
+# recorded. Caller-controlled strings are JSON-encoded via ``json.dumps`` and
+# therefore cannot inject forged line breaks or control characters into the
+# log stream.
+# ---------------------------------------------------------------------------
+
+_audit_logger = logging.getLogger(__name__)
+if not _audit_logger.handlers and not logging.getLogger().handlers:
+    # Ensure records are emitted even if Lambda has not configured a root
+    # handler (notably in unit tests and local invocations). AWS Lambda itself
+    # installs a root handler at startup, so this is a no-op in production.
+    _audit_logger.addHandler(logging.StreamHandler())
+_audit_logger.setLevel(logging.INFO)
+
+# Event name used for the CloudWatch metric filter.
+_AUDIT_EVENT_PREFIX = "miso.audit"
+
+
+def _audit(event_name: str, outcome: str, **fields: Any) -> None:
+    """Emit a single structured audit record.
+
+    ``event_name`` and ``outcome`` are controlled by this module; ``fields``
+    may contain caller-supplied values and are JSON-encoded so that any
+    embedded newlines, quotes, or control characters cannot split or forge a
+    second log record.
+    """
+    record = {"event": f"{_AUDIT_EVENT_PREFIX}.{event_name}", "outcome": outcome}
+    for key, value in fields.items():
+        if value is None:
+            continue
+        if isinstance(value, (set, frozenset)):
+            value = sorted(value)
+        record[key] = value
+    # ``default=str`` keeps the call total: any object that is not JSON-
+    # serialisable is coerced to its ``str`` form rather than raising inside a
+    # security log path.
+    _audit_logger.info(json.dumps(record, sort_keys=True, default=str))
+
+
+def _principal_from_authorizer(event: Any) -> dict[str, Any]:
+    """Extract non-sensitive principal identifiers from an API Gateway event.
+
+    Returns a dict with at most ``principal_id``, ``request_id`` and
+    ``source_ip`` populated. No tokens, emails or other sensitive claim
+    fields are read.
+    """
+    info: dict[str, Any] = {}
+    if not isinstance(event, dict):
+        return info
+    request_context = event.get("requestContext")
+    if not isinstance(request_context, dict):
+        return info
+    request_id = request_context.get("requestId")
+    if isinstance(request_id, str):
+        info["request_id"] = request_id
+    identity = request_context.get("identity")
+    if isinstance(identity, dict):
+        source_ip = identity.get("sourceIp")
+        if isinstance(source_ip, str):
+            info["source_ip"] = source_ip
+    authorizer = request_context.get("authorizer")
+    if isinstance(authorizer, dict):
+        claims = authorizer.get("claims") if isinstance(authorizer.get("claims"), dict) else {}
+        jwt_block = authorizer.get("jwt") if isinstance(authorizer.get("jwt"), dict) else {}
+        jwt_claims = jwt_block.get("claims") if isinstance(jwt_block.get("claims"), dict) else {}
+        for source in (claims, jwt_claims, authorizer):
+            if not isinstance(source, dict):
+                continue
+            principal = source.get("sub") or source.get("principalId")
+            if isinstance(principal, str) and principal:
+                info["principal_id"] = principal
+                break
+    return info
 
 _CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
 
@@ -114,6 +202,16 @@ def s3_trigger_handler(
     for uploaded_object in _s3_objects(event):
         brand = _brand_for_key(uploaded_object["key"], resolved_config)
         if brand is None:
+            # Rejected brand attribution: the uploaded object does not match
+            # any configured naming pattern. Record it so the data-plane
+            # upload is attributable even when no pipeline is started.
+            _audit(
+                "s3_trigger.brand_match",
+                "rejected",
+                bucket=uploaded_object.get("bucket"),
+                key=uploaded_object.get("key"),
+                reason="no_matching_brand",
+            )
             continue
         brand_id = brand["id"]
         existing = coalesced.get(brand_id)
@@ -124,9 +222,23 @@ def s3_trigger_handler(
                 "key": uploaded_object["key"],
                 "trigger": "s3",
             }
+            _audit(
+                "s3_trigger.brand_match",
+                "accepted",
+                brand_id=brand_id,
+                bucket=uploaded_object["bucket"],
+                key=uploaded_object["key"],
+            )
         else:
             existing.setdefault("coalesced_count", 1)
             existing["coalesced_count"] += 1
+            _audit(
+                "s3_trigger.brand_match",
+                "coalesced",
+                brand_id=brand_id,
+                bucket=uploaded_object.get("bucket"),
+                key=uploaded_object.get("key"),
+            )
 
     entries = [
         {
@@ -253,6 +365,7 @@ def eventbridge_trigger_handler(
     *,
     sagemaker_client: Any | None = None,
     config: dict[str, Any] | None = None,
+    _principal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Start the per-brand SageMaker pipeline from an EventBridge request.
 
@@ -260,6 +373,11 @@ def eventbridge_trigger_handler(
     the same brand is already running and (2) pinning a deterministic
     ``PipelineExecutionDisplayName`` so retries inside the throttle window
     collide instead of launching new GPU training jobs.
+
+    ``_principal`` is an internal, non-public parameter used by
+    ``manual_trigger_handler`` to attribute the start to the authenticated
+    caller in the emitted audit record. External EventBridge invocations
+    omit it and are audited as ``trigger='eventbridge'``.
     """
     resolved_config = config or load_config()
     detail = event.get("detail", event)
@@ -267,7 +385,15 @@ def eventbridge_trigger_handler(
         detail = json.loads(detail)
 
     brand_id = detail.get("brand_id")
-    if brand_id not in {brand["id"] for brand in resolved_config["brands"]}:
+    known_brands = {brand["id"] for brand in resolved_config["brands"]}
+    if brand_id not in known_brands:
+        _audit(
+            "eventbridge_trigger.brand",
+            "rejected",
+            brand_id=brand_id,
+            reason="unknown_brand",
+            principal=_principal,
+        )
         raise ValueError(f"Unknown brand_id: {brand_id!r}")
 
     # Pipeline target is derived from the validated ``brand_id`` only. Any
@@ -275,9 +401,26 @@ def eventbridge_trigger_handler(
     # deputy against ``sagemaker:StartPipelineExecution``.
     pipeline_name = _pipeline_name_for_brand(brand_id)
     trigger = detail.get("trigger", "eventbridge")
+    _audit(
+        "eventbridge_trigger.brand",
+        "accepted",
+        brand_id=brand_id,
+        trigger=trigger,
+        pipeline_name=pipeline_name,
+        principal=_principal,
+    )
 
     sagemaker = _client("sagemaker", sagemaker_client)
     if _has_in_flight_execution(sagemaker, pipeline_name, brand_id):
+        _audit(
+            "start_pipeline_execution",
+            "suppressed",
+            brand_id=brand_id,
+            trigger=trigger,
+            pipeline_name=pipeline_name,
+            reason="in_flight_execution",
+            principal=_principal,
+        )
         return {
             "brand_id": brand_id,
             "pipeline_execution_arn": None,
@@ -300,9 +443,20 @@ def eventbridge_trigger_handler(
             PipelineName=pipeline_name,
             PipelineParameters=_pipeline_parameters(brand_id, trigger, resolved_config),
         )
+    execution_arn = response["PipelineExecutionArn"]
+    _audit(
+        "start_pipeline_execution",
+        "started",
+        brand_id=brand_id,
+        trigger=trigger,
+        pipeline_name=pipeline_name,
+        pipeline_execution_arn=execution_arn,
+        pipeline_execution_display_name=display_name,
+        principal=_principal,
+    )
     return {
         "brand_id": brand_id,
-        "pipeline_execution_arn": response["PipelineExecutionArn"],
+        "pipeline_execution_arn": execution_arn,
         "trigger": trigger,
         "pipeline_execution_display_name": display_name,
     }
@@ -358,13 +512,30 @@ def _authorized_brands(event: dict[str, Any]) -> set[str]:
       * ``cognito:groups`` claim entries that start with ``brand:`` (e.g.
         ``brand:white-castle``).
     """
+    principal = _principal_from_authorizer(event)
     request_context = event.get("requestContext") if isinstance(event, dict) else None
     if not isinstance(request_context, dict):
+        _audit(
+            "authentication",
+            "denied",
+            reason="missing_request_context",
+            request_id=principal.get("request_id"),
+            source_ip=principal.get("source_ip"),
+            principal_id=principal.get("principal_id"),
+        )
         raise PermissionError(
             "Unauthenticated manual training request: missing requestContext"
         )
     authorizer = request_context.get("authorizer")
     if not isinstance(authorizer, dict) or not authorizer:
+        _audit(
+            "authentication",
+            "denied",
+            reason="missing_authorizer",
+            request_id=principal.get("request_id"),
+            source_ip=principal.get("source_ip"),
+            principal_id=principal.get("principal_id"),
+        )
         raise PermissionError(
             "Unauthenticated manual training request: missing authorizer context"
         )
@@ -407,7 +578,16 @@ def manual_trigger_handler(
     ``config.yaml``.
     """
     allowed_brands = _authorized_brands(event)
+    principal = _principal_from_authorizer(event)
     if not allowed_brands:
+        _audit(
+            "authorization",
+            "denied",
+            reason="no_authorized_brands",
+            principal_id=principal.get("principal_id"),
+            request_id=principal.get("request_id"),
+            source_ip=principal.get("source_ip"),
+        )
         raise PermissionError(
             "Authenticated principal is not authorized for any brand"
         )
@@ -432,6 +612,16 @@ def manual_trigger_handler(
     if not brand_id:
         raise ValueError("brand_id is required for a manual training request")
     if brand_id not in allowed_brands:
+        _audit(
+            "authorization",
+            "denied",
+            reason="brand_not_in_principal_binding",
+            principal_id=principal.get("principal_id"),
+            request_id=principal.get("request_id"),
+            source_ip=principal.get("source_ip"),
+            requested_brand_id=brand_id,
+            allowed_brands=sorted(allowed_brands),
+        )
         # Do not leak which brands the caller is bound to.
         raise PermissionError(
             f"Caller is not authorized to trigger training for brand_id {brand_id!r}"
@@ -442,4 +632,5 @@ def manual_trigger_handler(
         context,
         sagemaker_client=sagemaker_client,
         config=config,
+        _principal=principal or None,
     )
