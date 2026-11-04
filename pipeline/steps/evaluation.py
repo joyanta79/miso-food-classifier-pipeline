@@ -31,12 +31,18 @@ import tarfile
 import time
 from pathlib import Path
 
+sys.path.insert(0, "/opt/ml/processing/input/pkgcode")
 sys.path.insert(0, "/opt/ml/processing/input/pkgcode/pipeline/steps")
 import _bootstrap  # noqa: E402
 
 _bootstrap.ensure({"PIL": "pillow", "numpy": "numpy"})
 
 import numpy as np
+
+from processing._manifest_paths import (  # noqa: E402
+    ManifestPathError,
+    resolve_manifest_image,
+)
 
 # Safety caps for untrusted tarball extraction. The model.tar.gz is mounted from
 # an S3 prefix that any principal with s3:PutObject on the model-artifacts
@@ -253,8 +259,27 @@ def main() -> None:
     missing_images = 0
     latencies: list[float] = []
     for record in cleaned:
-        path = images_root / record["image_path"]
-        if not path.exists():
+        try:
+            path = resolve_manifest_image(
+                images_root, record, require_exists=False
+            )
+        except ManifestPathError as exc:
+            _abort(
+                metrics_out,
+                (
+                    f"cleaned_dataset record "
+                    f"{record.get('id', record.get('image_path'))!r} rejected by "
+                    f"manifest path containment check: {exc}"
+                ),
+                {
+                    "classes": labels_sorted,
+                    "sample_count": total,
+                    "not_done_sample_count": not_done_evaluated,
+                    "done_sample_count": done_evaluated,
+                    "missing_images": missing_images,
+                },
+            )
+        if path is None or not path.exists():
             # Count missing files instead of silently dropping records; the step
             # aborts below when missing_images > 0.
             missing_images += 1
