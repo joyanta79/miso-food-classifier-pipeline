@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from collections.abc import Iterable
@@ -16,6 +17,31 @@ from typing import Any
 from urllib.parse import unquote_plus
 
 import yaml
+
+# Module logger. The AWS Lambda runtime attaches a CloudWatch Logs handler to
+# the root logger, so emitted records are captured in the function's log group
+# without further configuration. Each record uses a stable ``event`` key so
+# downstream log-based metric filters / alarms can key off the event name.
+logger = logging.getLogger(__name__)
+if not logger.handlers and logger.level == logging.NOTSET:
+    # When run outside AWS (local mode / tests) make sure records are not
+    # silently dropped. ``logging.lastResort`` already emits to stderr at
+    # WARNING+, so only configure the module's own level here.
+    logger.setLevel(logging.INFO)
+
+
+def _log(event_name: str, **fields: Any) -> None:
+    """Emit a single-line structured JSON log record.
+
+    Keeping the record a flat JSON object makes it trivially parseable by
+    CloudWatch Logs Insights and by log-based metric filters.
+    """
+    try:
+        payload = json.dumps({"event": event_name, **fields}, default=str, sort_keys=True)
+    except (TypeError, ValueError):
+        payload = json.dumps({"event": event_name, "_unserializable_fields": True})
+    logger.info(payload)
+
 
 _CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
 
@@ -66,6 +92,21 @@ def _brand_for_key(key: str, config: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _key_prefix(key: str) -> str | None:
+    """Return the leading path segment of ``key``, or ``None`` if there isn't one.
+
+    S3 object keys that encode a tenant prefix (``brand-a/foo.jpg``) place that
+    tenant id as the first path segment. Comparing it to the brand selected by
+    the filename-driven ``_brand_for_key`` lets us record whether the prefix
+    agreed with the pattern-derived brand, which is exactly what an incident
+    responder needs after a cross-brand trigger.
+    """
+    if "/" not in key:
+        return None
+    head, _ = key.split("/", 1)
+    return head or None
+
+
 def _s3_objects(event: dict[str, Any]) -> list[dict[str, str]]:
     """Normalize native S3 and EventBridge S3 event shapes."""
     if "Records" in event:
@@ -112,16 +153,41 @@ def s3_trigger_handler(
     # does not lose the fan-in information.
     coalesced: dict[str, dict[str, Any]] = {}
     for uploaded_object in _s3_objects(event):
-        brand = _brand_for_key(uploaded_object["key"], resolved_config)
+        key = uploaded_object["key"]
+        bucket = uploaded_object["bucket"]
+        brand = _brand_for_key(key, resolved_config)
+        key_prefix = _key_prefix(key)
         if brand is None:
+            # Record unmatched uploads at the trust boundary so an incident
+            # responder can see every attacker-controlled key the handler saw,
+            # not just the ones that matched a brand.
+            _log(
+                "s3_trigger.unmatched_upload",
+                bucket=bucket,
+                key=key,
+                key_prefix=key_prefix,
+            )
             continue
         brand_id = brand["id"]
+        # Record the brand-attribution decision: which bucket/key the handler
+        # saw, which brand its filename-driven pattern matched, and whether
+        # the key's leading path segment agreed with that brand. A mismatch is
+        # the forensic signature of a cross-tenant trigger attempt.
+        prefix_matches_brand = key_prefix == brand_id if key_prefix is not None else None
+        _log(
+            "s3_trigger.brand_attributed",
+            bucket=bucket,
+            key=key,
+            key_prefix=key_prefix,
+            brand_id=brand_id,
+            prefix_matches_brand=prefix_matches_brand,
+        )
         existing = coalesced.get(brand_id)
         if existing is None:
             coalesced[brand_id] = {
                 "brand_id": brand_id,
-                "bucket": uploaded_object["bucket"],
-                "key": uploaded_object["key"],
+                "bucket": bucket,
+                "key": key,
                 "trigger": "s3",
             }
         else:
@@ -145,12 +211,50 @@ def s3_trigger_handler(
     accepted = 0
     failed = 0
     event_ids: list[str | None] = []
+    failed_entries: list[dict[str, Any]] = []
     for batch in _chunks(entries, _EVENTBRIDGE_MAX_BATCH):
         response = events_client.put_events(Entries=batch)
         batch_failed = response.get("FailedEntryCount", 0)
         failed += batch_failed
         accepted += len(batch) - batch_failed
-        event_ids.extend(entry.get("EventId") for entry in response.get("Entries", []))
+        response_entries = response.get("Entries", []) or []
+        event_ids.extend(entry.get("EventId") for entry in response_entries)
+        if batch_failed:
+            # EventBridge returns a per-entry failure object with ErrorCode /
+            # ErrorMessage when the top-level call is HTTP 200 but one or more
+            # entries were rejected (throttling, internal error, etc.). Capture
+            # those so (1) the operator sees the real cause in CloudWatch Logs
+            # and (2) the async invoker's retry / DLQ machinery is engaged by
+            # the exception raised below.
+            for request_entry, response_entry in zip(batch, response_entries):
+                error_code = response_entry.get("ErrorCode")
+                if not error_code:
+                    continue
+                failure = {
+                    "error_code": error_code,
+                    "error_message": response_entry.get("ErrorMessage"),
+                    "detail_type": request_entry.get("DetailType"),
+                    "source": request_entry.get("Source"),
+                    "event_bus_name": request_entry.get("EventBusName"),
+                }
+                failed_entries.append(failure)
+                _log("s3_trigger.put_events_entry_failed", **failure)
+
+    if failed:
+        _log(
+            "s3_trigger.put_events_failed",
+            accepted=accepted,
+            failed=failed,
+            event_bus=event_bus,
+            failed_entries=failed_entries,
+        )
+        # Raise so the Lambda async invoker retries and the configured DLQ
+        # captures the loss instead of silently dropping the training request.
+        raise RuntimeError(
+            f"EventBridge PutEvents reported FailedEntryCount={failed} "
+            f"(accepted={accepted}); first error: "
+            f"{failed_entries[0] if failed_entries else 'unknown'}"
+        )
 
     return {
         "accepted": accepted,
@@ -278,6 +382,12 @@ def eventbridge_trigger_handler(
 
     sagemaker = _client("sagemaker", sagemaker_client)
     if _has_in_flight_execution(sagemaker, pipeline_name, brand_id):
+        _log(
+            "eventbridge_trigger.skipped_in_flight",
+            brand_id=brand_id,
+            pipeline_name=pipeline_name,
+            trigger=trigger,
+        )
         return {
             "brand_id": brand_id,
             "pipeline_execution_arn": None,
@@ -300,9 +410,21 @@ def eventbridge_trigger_handler(
             PipelineName=pipeline_name,
             PipelineParameters=_pipeline_parameters(brand_id, trigger, resolved_config),
         )
+    pipeline_execution_arn = response["PipelineExecutionArn"]
+    # Record the start so a pipeline execution can always be traced back to the
+    # brand (tenancy) and trigger that caused it. Pairs with the
+    # ``s3_trigger.brand_attributed`` record emitted at the trust boundary.
+    _log(
+        "eventbridge_trigger.pipeline_started",
+        brand_id=brand_id,
+        pipeline_name=pipeline_name,
+        pipeline_execution_arn=pipeline_execution_arn,
+        pipeline_execution_display_name=display_name,
+        trigger=trigger,
+    )
     return {
         "brand_id": brand_id,
-        "pipeline_execution_arn": response["PipelineExecutionArn"],
+        "pipeline_execution_arn": pipeline_execution_arn,
         "trigger": trigger,
         "pipeline_execution_display_name": display_name,
     }
