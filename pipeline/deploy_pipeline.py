@@ -667,6 +667,14 @@ def main() -> None:
     pipeline = build(config, args.code_prefix, args.images_uri, pipeline_name=pipeline_name)
     role = config["aws"]["sagemaker_role_arn"]
 
+    # Fail-closed backstop before upsert: assert the pipeline the SDK produced
+    # still carries the documented safety-gate topology. deploy_pipeline builds
+    # its own copy of the DAG, so without this call the topology validator in
+    # pipeline/pipeline.py is bypassed on the --upsert path.
+    from pipeline.pipeline import validate_sdk_pipeline_definition  # noqa: WPS433
+
+    validate_sdk_pipeline_definition(pipeline.definition())
+
     if args.upsert:
         pipeline.upsert(role_arn=role)
         print(f"[deploy] upserted pipeline: {pipeline.name}")
