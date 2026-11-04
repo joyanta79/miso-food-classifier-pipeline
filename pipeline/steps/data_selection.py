@@ -118,7 +118,13 @@ def select(
             "be mixed into this brand's dataset."
         )
 
-    manifest: list[dict[str, Any]] = []
+    # Scan twice conceptually: first collect every candidate record and its
+    # label, then prune classes that fall below ``min_images_per_class`` --
+    # mirroring the sibling ``processing.step0_data_selection.select_data``
+    # behaviour (CWE-841). A single uploaded object with a fresh label token
+    # must not be able to drag ``minimum_class_count`` down to 1 and poison
+    # the DatasetBoundsGate for every subsequent run.
+    candidates: list[dict[str, Any]] = []
     label_counts: Counter[str] = Counter()
     for path in sorted(image_root.rglob("*")):
         if path.suffix.lower() not in _IMAGE_SUFFIXES:
@@ -145,7 +151,7 @@ def select(
         except ValueError:
             rel_path = Path(path.name).as_posix()
         label_counts[label] += 1
-        manifest.append(
+        candidates.append(
             {
                 "id": rel_path,
                 "key": rel_path,
@@ -155,12 +161,43 @@ def select(
                 "last_modified": datetime.now(UTC).isoformat(),
             }
         )
+    # Drop under-represented classes from both the manifest and the aggregate
+    # ``minimum_class_count`` metric so a one-image attacker label cannot sink
+    # the gate. Report the dropped labels and their counts in a separate
+    # metric so operators can see likely poisoning attempts.
+    eligible_labels = {
+        label
+        for label, count in label_counts.items()
+        if count >= min_images_per_class
+    }
+    dropped_label_counts = {
+        label: count
+        for label, count in label_counts.items()
+        if label not in eligible_labels
+    }
+    manifest = [item for item in candidates if item["label"] in eligible_labels]
+    eligible_counts = {
+        label: count
+        for label, count in label_counts.items()
+        if label in eligible_labels
+    }
     dataset_size = len(manifest)
-    minimum_class_count = min(label_counts.values()) if label_counts else 0
+    eligible_class_count = len(eligible_counts)
+    # A valid multi-class dataset needs at least two eligible classes; a
+    # single-class manifest cannot train a classifier even if its one class
+    # clears ``min_images_per_class``. Emit ``minimum_class_count = 0`` in
+    # that case so the DatasetBoundsGate fails closed with the same metric
+    # it already consumes, rather than reporting a misleading success value.
+    if eligible_class_count >= 2:
+        minimum_class_count = min(eligible_counts.values())
+    else:
+        minimum_class_count = 0
     metrics = {
         "dataset_size": dataset_size,
         "minimum_class_count": minimum_class_count,
-        "class_distribution": dict(sorted(label_counts.items())),
+        "eligible_class_count": eligible_class_count,
+        "class_distribution": dict(sorted(eligible_counts.items())),
+        "dropped_label_counts": dict(sorted(dropped_label_counts.items())),
         "target_dataset_min": target_dataset_min,
         "target_dataset_max": target_dataset_max,
         "min_images_per_class": min_images_per_class,
@@ -224,7 +261,9 @@ def main() -> None:
     print(
         f"[data_selection] dataset_size={metrics['dataset_size']} "
         f"minimum_class_count={metrics['minimum_class_count']} "
-        f"distribution={metrics['class_distribution']}"
+        f"eligible_class_count={metrics['eligible_class_count']} "
+        f"distribution={metrics['class_distribution']} "
+        f"dropped_label_counts={metrics['dropped_label_counts']}"
     )
 
 
