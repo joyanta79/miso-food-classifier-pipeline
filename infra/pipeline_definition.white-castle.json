@@ -17,24 +17,6 @@
       "Type": "String"
     },
     {
-      "DefaultValue": "white-castle",
-      "Description": "Fixed pipeline brand identifier.",
-      "Name": "BrandId",
-      "Type": "String"
-    },
-    {
-      "DefaultValue": "wc_*",
-      "Description": "Allowed raw-data filename prefix pattern.",
-      "Name": "BrandNamingPattern",
-      "Type": "String"
-    },
-    {
-      "DefaultValue": "FoodClassifier-WhiteCastle",
-      "Description": "Brand-specific SageMaker Model Registry package group.",
-      "Name": "ModelPackageGroup",
-      "Type": "String"
-    },
-    {
       "DefaultValue": 6,
       "Description": "Maximum image age to select.",
       "Name": "RecencyMonths",
@@ -190,13 +172,9 @@
           "ImageUri": "683313688378.dkr.ecr.us-west-2.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3"
         },
         "Environment": {
-          "BRAND_ID": {
-            "Get": "Parameters.BrandId"
-          },
+          "BRAND_ID": "white-castle",
           "MIN_IMAGES_PER_CLASS": "500",
-          "NAMING_PATTERN": {
-            "Get": "Parameters.BrandNamingPattern"
-          },
+          "NAMING_PATTERN": "wc_*",
           "RECENCY_MONTHS": {
             "Get": "Parameters.RecencyMonths"
           },
@@ -727,9 +705,7 @@
                           "Tags": [
                             {
                               "Key": "brand",
-                              "Value": {
-                                "Get": "Parameters.BrandId"
-                              }
+                              "Value": "white-castle"
                             }
                           ]
                         },
@@ -908,9 +884,7 @@
                             {
                               "Arguments": {
                                 "CustomerMetadataProperties": {
-                                  "brand_id": {
-                                    "Get": "Parameters.BrandId"
-                                  },
+                                  "brand_id": "white-castle",
                                   "ml_lead_topic_arn": {
                                     "Get": "Parameters.MlLeadTopicArn"
                                   },
@@ -952,9 +926,7 @@
                                     }
                                   }
                                 },
-                                "ModelPackageGroupName": {
-                                  "Get": "Parameters.ModelPackageGroup"
-                                }
+                                "ModelPackageGroupName": "FoodClassifier-WhiteCastle"
                               },
                               "Name": "RegisterModelPendingManualApproval",
                               "Type": "RegisterModel"

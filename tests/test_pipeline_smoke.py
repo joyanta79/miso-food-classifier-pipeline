@@ -33,15 +33,37 @@ def test_local_dry_run_is_complete_for_every_declared_brand() -> None:
         validate_dry_run_definition(definition, config=config)
 
         parameters = {item["Name"]: item["DefaultValue"] for item in definition["Parameters"]}
+        steps = _flatten_steps(definition["Steps"])
         register_step = next(
             step
-            for step in _flatten_steps(definition["Steps"])
+            for step in steps
             if step["Name"] == "RegisterModelPendingManualApproval"
         )
+        select_step = next(
+            step for step in steps if step["Name"] == "SelectRecentBrandData"
+        )
 
-        assert parameters["BrandId"] == brand["id"]
-        assert parameters["BrandNamingPattern"] == brand["naming_pattern"]
-        assert parameters["ModelPackageGroup"] == brand["model_package_group"]
+        # Brand identity is baked into the definition as literals (not pipeline
+        # parameters) so a StartPipelineExecution caller cannot redirect the
+        # registered model into another brand's registry or forge the brand_id
+        # metadata (CWE-639).
+        assert "BrandId" not in parameters
+        assert "BrandNamingPattern" not in parameters
+        assert "ModelPackageGroup" not in parameters
+        assert definition["Metadata"]["BrandId"] == brand["id"]
+        assert select_step["Arguments"]["Environment"]["BRAND_ID"] == brand["id"]
+        assert (
+            select_step["Arguments"]["Environment"]["NAMING_PATTERN"]
+            == brand["naming_pattern"]
+        )
+        assert (
+            register_step["Arguments"]["ModelPackageGroupName"]
+            == brand["model_package_group"]
+        )
+        assert (
+            register_step["Arguments"]["CustomerMetadataProperties"]["brand_id"]
+            == brand["id"]
+        )
         assert register_step["Arguments"]["ModelApprovalStatus"] == "PendingManualApproval"
 
 
@@ -57,9 +79,12 @@ def test_dry_run_parameters_match_all_configured_gates() -> None:
     assert parameters["ReviewTopicArn"] == config["notifications"]["review_topic_arn"]
     assert parameters["MockAws"] is config["local_mode"]["mock_aws"]
 
-    # Safety-critical gate thresholds must not be exposed as execution parameters,
-    # because SageMaker PipelineParameters are overridable per execution. They are
-    # instead baked as literal RightValues into the Condition steps.
+    # Safety-critical gate thresholds AND brand-identity values must not be
+    # exposed as execution parameters, because SageMaker PipelineParameters are
+    # overridable per execution. The identity triple is baked as literals into
+    # the definition (RegisterModel.ModelPackageGroupName, Metadata.BrandId,
+    # SelectRecentBrandData.Environment); the gate thresholds are baked as
+    # literal RightValues into the Condition steps.
     forbidden = {
         "AccuracyThreshold",
         "FpRateEmergencyThreshold",
@@ -70,6 +95,9 @@ def test_dry_run_parameters_match_all_configured_gates() -> None:
         "TargetDatasetMin",
         "TargetDatasetMax",
         "MinImagesPerClass",
+        "BrandId",
+        "BrandNamingPattern",
+        "ModelPackageGroup",
     }
     assert forbidden.isdisjoint(parameters), (
         "Safety-critical thresholds leaked back into pipeline parameters: "
@@ -164,10 +192,23 @@ def test_each_checked_in_brand_definition_passes_consistency_validation() -> Non
         path = INFRA_DIR / f"pipeline_definition.{brand['id']}.json"
         definition = json.loads(path.read_text(encoding="utf-8"))
         validate_dry_run_definition(definition, config=config)
-        parameters = {item["Name"]: item["DefaultValue"] for item in definition["Parameters"]}
-        assert parameters["BrandId"] == brand["id"]
-        assert parameters["BrandNamingPattern"] == brand["naming_pattern"]
-        assert parameters["ModelPackageGroup"] == brand["model_package_group"]
+        steps = _flatten_steps(definition["Steps"])
+        select_step = next(
+            step for step in steps if step["Name"] == "SelectRecentBrandData"
+        )
+        register_step = next(
+            step for step in steps if step["Name"] == "RegisterModelPendingManualApproval"
+        )
+        assert definition["Metadata"]["BrandId"] == brand["id"]
+        assert select_step["Arguments"]["Environment"]["BRAND_ID"] == brand["id"]
+        assert (
+            select_step["Arguments"]["Environment"]["NAMING_PATTERN"]
+            == brand["naming_pattern"]
+        )
+        assert (
+            register_step["Arguments"]["ModelPackageGroupName"]
+            == brand["model_package_group"]
+        )
 
 
 def test_validate_dry_run_rejects_brand_pattern_mismatch() -> None:
@@ -180,11 +221,12 @@ def test_validate_dry_run_rejects_brand_pattern_mismatch() -> None:
 
     config = load_config(DEFAULT_CONFIG_PATH)
     definition = build_dry_run_definition(DEFAULT_CONFIG_PATH, "brand-b")
-    # Simulate the "template clone" bug: overwrite BrandNamingPattern with the
-    # white-castle default while leaving BrandId=brand-b.
-    for item in definition["Parameters"]:
-        if item["Name"] == "BrandNamingPattern":
-            item["DefaultValue"] = "wc_*"
+    # Simulate the "template clone" bug: overwrite the SelectRecentBrandData
+    # NAMING_PATTERN literal with the white-castle default while leaving the
+    # BrandId literal as brand-b.
+    for step in _flatten_steps(definition["Steps"]):
+        if step["Name"] == "SelectRecentBrandData":
+            step["Arguments"]["Environment"]["NAMING_PATTERN"] = "wc_*"
             break
     with pytest.raises(ValueError, match="BrandNamingPattern"):
         validate_dry_run_definition(definition, config=config)

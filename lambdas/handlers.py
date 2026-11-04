@@ -166,11 +166,14 @@ def _pipeline_parameters(
     # facts baked into the pipeline definition as literals; passing them as
     # ``PipelineParameters`` would both be rejected by SageMaker (unknown
     # parameter) and reopen the code-channel / role-override hijack path
-    # (CWE-494). The ``config`` argument is retained for forward-compatible
-    # callers but is intentionally unused.
-    del config
+    # (CWE-494). BrandId / BrandNamingPattern / ModelPackageGroup are likewise
+    # NOT submitted here: they are now baked into the per-brand definition as
+    # literals so a StartPipelineExecution caller cannot redirect the
+    # registered model package into another brand's Model Package Group or
+    # forge the brand_id metadata (CWE-639). The target brand is selected by
+    # routing to the brand's dedicated pipeline name instead.
+    del config, brand_id
     return [
-        {"Name": "BrandId", "Value": brand_id},
         {"Name": "TriggerSource", "Value": trigger},
     ]
 
