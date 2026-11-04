@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import posixpath
 import time
 from collections.abc import Iterable
 from fnmatch import fnmatch
@@ -16,6 +18,8 @@ from typing import Any
 from urllib.parse import unquote_plus
 
 import yaml
+
+_LOGGER = logging.getLogger(__name__)
 
 _CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
 
@@ -58,16 +62,88 @@ def _client(service_name: str, injected_client: Any | None) -> Any:
     return boto3.client(service_name)
 
 
-def _brand_for_key(key: str, config: dict[str, Any]) -> dict[str, Any] | None:
-    filename = Path(key).name
+def _normalize_key(key: str) -> str | None:
+    """Validate and canonicalize an S3 object key.
+
+    Returns the normalized key on success, or ``None`` if the key is unsafe
+    (absolute, contains ``..`` segments, or has empty components). Keeping
+    the raw key form elsewhere lets attackers hide a cross-tenant prefix
+    (e.g. ``brand-b/../white-castle/wc_x.jpg``) behind path tricks; a key
+    that cannot be unambiguously resolved to a single prefix is rejected
+    rather than attributed.
+    """
+    if not isinstance(key, str) or not key:
+        return None
+    # S3 keys are not filesystem paths; they are opaque strings whose only
+    # delimiter we rely on is ``/``. Reject obvious abuse.
+    if key.startswith("/"):
+        return None
+    parts = key.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        return None
+    return key
+
+
+def _brand_from_prefix(key: str, config: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the brand whose id matches the first path component of ``key``.
+
+    This is the *trusted* tenancy signal: upload credentials are expected to
+    be scoped to ``s3://<raw-archive>/<brand.id>/`` (see
+    ``pipeline/pipeline.py``), so the prefix is attacker-constrained to the
+    uploader's own brand.
+    """
+    prefix, sep, _ = key.partition("/")
+    if not sep or not prefix:
+        return None
     for brand in config["brands"]:
-        if fnmatch(filename, brand["naming_pattern"]):
+        if brand["id"] == prefix:
             return brand
     return None
 
 
+def _brand_from_naming_pattern(
+    key: str, config: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Return the brand whose ``naming_pattern`` matches ``Path(key).name``.
+
+    Used for integrity cross-checks only; the result MUST NOT be used as the
+    tenancy decision on its own because the basename is attacker-chosen.
+    """
+    filename = posixpath.basename(key)
+    for brand in config["brands"]:
+        pattern = brand.get("naming_pattern")
+        if pattern and fnmatch(filename, pattern):
+            return brand
+    return None
+
+
+# Retained under its historical name for backward compatibility with any
+# internal caller that imported it; the trusted tenancy signal is now the
+# key prefix, with the naming pattern used only as a filename sanity check.
+def _brand_for_key(key: str, config: dict[str, Any]) -> dict[str, Any] | None:
+    normalized = _normalize_key(key)
+    if normalized is None:
+        return None
+    prefix_brand = _brand_from_prefix(normalized, config)
+    if prefix_brand is None:
+        return None
+    pattern = prefix_brand.get("naming_pattern")
+    if pattern and not fnmatch(posixpath.basename(normalized), pattern):
+        return None
+    return prefix_brand
+
+
 def _s3_objects(event: dict[str, Any]) -> list[dict[str, str]]:
-    """Normalize native S3 and EventBridge S3 event shapes."""
+    """Normalize native S3 and EventBridge S3 event shapes.
+
+    Native S3 ``Records`` keys are URL-encoded and must be ``unquote_plus``'d
+    before use. EventBridge ``Object Created`` ``detail.object.key`` values
+    are NOT URL-encoded; applying ``unquote_plus`` to them would let an
+    attacker smuggle a cross-tenant basename past bucket-policy/IAM controls
+    written against the literal key (e.g. storing ``brand-b/%77c_evil.jpg``
+    and getting it attributed to ``white-castle``). Each shape is therefore
+    decoded only as its own producer specifies.
+    """
     if "Records" in event:
         objects = []
         for record in event["Records"]:
@@ -81,7 +157,69 @@ def _s3_objects(event: dict[str, Any]) -> list[dict[str, str]]:
     detail = event.get("detail", {})
     bucket = detail.get("bucket", {}).get("name")
     key = detail.get("object", {}).get("key")
-    return [{"bucket": bucket, "key": unquote_plus(key)}] if bucket and key else []
+    # EventBridge S3 keys are already decoded; do NOT ``unquote_plus`` them.
+    return [{"bucket": bucket, "key": key}] if bucket and key else []
+
+
+def _emit_cross_tenant_metric(
+    cloudwatch_client: Any | None,
+    *,
+    bucket: str,
+    key: str,
+    prefix_brand_id: str | None,
+    pattern_brand_id: str | None,
+    reason: str,
+) -> None:
+    """Best-effort emit of a CrossTenantTriggerAttempt metric/alarm signal.
+
+    A key whose prefix and filename disagree indicates either misconfiguration
+    or an active attempt to attribute an upload to another tenant. We always
+    log a structured warning; if a CloudWatch client is available we also
+    publish a metric so an alarm can be wired against it. Failures here must
+    never prevent the handler from rejecting the event.
+    """
+    _LOGGER.warning(
+        "cross_tenant_trigger_attempt bucket=%s key=%s prefix_brand=%s "
+        "pattern_brand=%s reason=%s",
+        bucket,
+        key,
+        prefix_brand_id,
+        pattern_brand_id,
+        reason,
+    )
+    try:
+        client = _client("cloudwatch", cloudwatch_client)
+    except Exception:
+        return
+    put_metric = getattr(client, "put_metric_data", None)
+    if put_metric is None:
+        return
+    try:
+        put_metric(
+            Namespace="Miso/Training",
+            MetricData=[
+                {
+                    "MetricName": "CrossTenantTriggerAttempt",
+                    "Value": 1,
+                    "Unit": "Count",
+                    "Dimensions": [
+                        {"Name": "Reason", "Value": reason},
+                        {
+                            "Name": "PrefixBrand",
+                            "Value": prefix_brand_id or "unknown",
+                        },
+                        {
+                            "Name": "PatternBrand",
+                            "Value": pattern_brand_id or "unknown",
+                        },
+                    ],
+                }
+            ],
+        )
+    except Exception:
+        # Observability is best-effort; swallow so the authorization decision
+        # (reject the event) is the behavior the caller sees.
+        return
 
 
 def _chunks(items: list[dict[str, Any]], size: int) -> Iterable[list[dict[str, Any]]]:
@@ -94,9 +232,24 @@ def s3_trigger_handler(
     _context: Any,
     *,
     eventbridge_client: Any | None = None,
+    cloudwatch_client: Any | None = None,
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Publish a brand-scoped training request for each recognized S3 upload.
+
+    Tenancy is derived from the trusted parts of the event:
+
+    * The event's bucket must be the configured
+      ``config['s3']['raw_archive_bucket']``; notifications from any other
+      bucket are discarded.
+    * The object key, after normalization (``..``, absolute keys and empty
+      segments are rejected), must start with ``<brand.id>/``. The brand
+      selected is the one that owns that prefix.
+    * The basename is used only as a sanity check against the brand's
+      ``naming_pattern``. If the pattern-matched brand disagrees with the
+      prefix-matched brand the upload is a hard rejection (cross-tenant
+      trigger attempt) and a ``CrossTenantTriggerAttempt`` metric is
+      emitted; the pattern's brand is never selected.
 
     Multiple uploads for the same brand in a single invocation are coalesced
     into a single ``BrandTrainingRequested`` event so a burst of writes cannot
@@ -106,22 +259,76 @@ def s3_trigger_handler(
     """
     resolved_config = config or load_config()
     event_bus = os.environ.get("MISO_EVENT_BUS_NAME", "default")
+    raw_archive_bucket = (resolved_config.get("s3") or {}).get("raw_archive_bucket")
 
     # Coalesce per brand: first-wins on representative bucket/key, and record
     # how many uploads collapsed into each entry so downstream observability
     # does not lose the fan-in information.
     coalesced: dict[str, dict[str, Any]] = {}
+    rejected = 0
     for uploaded_object in _s3_objects(event):
-        brand = _brand_for_key(uploaded_object["key"], resolved_config)
-        if brand is None:
+        bucket = uploaded_object["bucket"]
+        key = uploaded_object["key"]
+
+        # (1) Bucket allowlist: only the configured raw-archive bucket is a
+        # legitimate source for brand-training events. A notification from
+        # any other bucket (misconfiguration or forged invoke) is dropped.
+        if not raw_archive_bucket or bucket != raw_archive_bucket:
+            rejected += 1
+            _LOGGER.warning(
+                "s3_trigger rejected: untrusted bucket=%s expected=%s key=%s",
+                bucket,
+                raw_archive_bucket,
+                key,
+            )
             continue
-        brand_id = brand["id"]
+
+        # (2) Normalize the key and reject path-abuse (``..``, absolute,
+        # empty components) up front.
+        normalized = _normalize_key(key)
+        if normalized is None:
+            rejected += 1
+            _LOGGER.warning(
+                "s3_trigger rejected: unsafe key=%s bucket=%s", key, bucket
+            )
+            continue
+
+        # (3) The prefix is the tenancy signal. If the first path component
+        # does not match any configured brand, drop the event.
+        prefix_brand = _brand_from_prefix(normalized, resolved_config)
+        if prefix_brand is None:
+            continue
+
+        # (4) Cross-check the basename against the prefix brand's pattern.
+        # If the basename matches a *different* brand's naming_pattern the
+        # upload is a cross-tenant trigger attempt: hard reject and emit a
+        # metric. The pattern's brand is NEVER selected.
+        pattern_brand = _brand_from_naming_pattern(normalized, resolved_config)
+        if pattern_brand is not None and pattern_brand["id"] != prefix_brand["id"]:
+            rejected += 1
+            _emit_cross_tenant_metric(
+                cloudwatch_client,
+                bucket=bucket,
+                key=normalized,
+                prefix_brand_id=prefix_brand["id"],
+                pattern_brand_id=pattern_brand["id"],
+                reason="prefix_pattern_mismatch",
+            )
+            continue
+
+        # If the basename does not match the prefix brand's own pattern,
+        # drop (not a cross-tenant attempt, just not a training image).
+        own_pattern = prefix_brand.get("naming_pattern")
+        if own_pattern and not fnmatch(posixpath.basename(normalized), own_pattern):
+            continue
+
+        brand_id = prefix_brand["id"]
         existing = coalesced.get(brand_id)
         if existing is None:
             coalesced[brand_id] = {
                 "brand_id": brand_id,
-                "bucket": uploaded_object["bucket"],
-                "key": uploaded_object["key"],
+                "bucket": bucket,
+                "key": normalized,
                 "trigger": "s3",
             }
         else:
@@ -139,7 +346,14 @@ def s3_trigger_handler(
     ]
 
     if not entries:
-        return {"accepted": 0, "failed": 0, "message": "No configured brand matched the upload."}
+        result: dict[str, Any] = {
+            "accepted": 0,
+            "failed": 0,
+            "message": "No configured brand matched the upload.",
+        }
+        if rejected:
+            result["rejected"] = rejected
+        return result
 
     events_client = _client("events", eventbridge_client)
     accepted = 0
@@ -152,11 +366,14 @@ def s3_trigger_handler(
         accepted += len(batch) - batch_failed
         event_ids.extend(entry.get("EventId") for entry in response.get("Entries", []))
 
-    return {
+    result = {
         "accepted": accepted,
         "failed": failed,
         "event_ids": event_ids,
     }
+    if rejected:
+        result["rejected"] = rejected
+    return result
 
 
 def _pipeline_parameters(
