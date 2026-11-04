@@ -24,6 +24,7 @@ Python 3.10 compatible.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -135,6 +136,9 @@ def _abort(metrics_out: Path, reason: str, extra: dict) -> None:
         "done_sample_count": int(extra.get("done_sample_count", 0)),
         "missing_images": int(extra.get("missing_images", 0)),
         "classes": list(extra.get("classes", [])),
+        "test_dataset_hash": str(extra.get("test_dataset_hash", "")),
+        "train_dataset_hash": str(extra.get("train_dataset_hash", "")),
+        "train_test_overlap": int(extra.get("train_test_overlap", 0)),
         "abort_reason": reason,
     }
     _write_metrics(metrics_out, metrics)
@@ -149,6 +153,30 @@ def _positive_int(value, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _record_id(record: dict) -> str:
+    """Stable identifier for a manifest record.
+
+    Must match the identifier used by the split step in kfold_cleanlab.py so
+    overlap detection is reliable; prefers ``id`` and falls back to the
+    manifest ``image_path`` for legacy manifests.
+    """
+    identity = record.get("id") or record.get("image_path")
+    if not identity:
+        raise ValueError(
+            "record is missing both 'id' and 'image_path'; cannot cross-check splits"
+        )
+    return str(identity)
+
+
+def _manifest_hash(records: list[dict]) -> str:
+    """Content hash over the sorted record ids of ``records``."""
+    hasher = hashlib.sha256()
+    for identity in sorted(_record_id(r) for r in records):
+        hasher.update(identity.encode("utf-8"))
+        hasher.update(b"\n")
+    return hasher.hexdigest()
 
 
 def _load_model(model_dir: Path):
@@ -170,8 +198,25 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="EvaluateModel step")
     parser.add_argument("--model", default="/opt/ml/processing/input/model")
     parser.add_argument("--images", default="/opt/ml/processing/input/images")
+    # ``--cleaned`` is retained for backwards compatibility with any caller
+    # that still passes a single manifest; when both split manifests exist
+    # alongside it, the test manifest takes precedence so the release gate is
+    # scored only on held-out data.
     parser.add_argument(
         "--cleaned", default="/opt/ml/processing/input/dataset/cleaned_dataset.json"
+    )
+    parser.add_argument(
+        "--test",
+        default="/opt/ml/processing/input/dataset/test_dataset.json",
+        help="Held-out test manifest emitted by the quality step. Preferred over --cleaned.",
+    )
+    parser.add_argument(
+        "--train",
+        default="/opt/ml/processing/input/dataset/train_dataset.json",
+        help=(
+            "Training manifest emitted by the quality step. Only its record ids are"
+            " read, to verify there is no overlap with the test manifest."
+        ),
     )
     parser.add_argument("--metrics-out", default="/opt/ml/processing/output/metrics")
     parser.add_argument(
@@ -218,7 +263,77 @@ def main() -> None:
 
     model = _load_model(model_dir)
 
-    cleaned = json.loads(Path(args.cleaned).read_text(encoding="utf-8"))
+    # Prefer the held-out test manifest emitted by the quality/split step so
+    # the EvaluateModel release gate measures accuracy and the emergency
+    # false-positive rate on data the training step never saw. Fail closed if
+    # the test manifest overlaps the training manifest or is empty / too
+    # small; the fallback to ``--cleaned`` exists only for legacy quality
+    # outputs that predate the split and does not substitute for a real
+    # held-out evaluation.
+    test_path = Path(args.test)
+    train_path = Path(args.train)
+    cleaned_path = Path(args.cleaned)
+    train_dataset_hash = ""
+    test_dataset_hash = ""
+    train_test_overlap = 0
+    if test_path.exists():
+        cleaned = json.loads(test_path.read_text(encoding="utf-8"))
+        test_dataset_hash = _manifest_hash(cleaned)
+        if train_path.exists():
+            train_records = json.loads(train_path.read_text(encoding="utf-8"))
+            train_dataset_hash = _manifest_hash(train_records)
+            train_ids = {_record_id(r) for r in train_records}
+            test_ids = {_record_id(r) for r in cleaned}
+            overlap = sorted(train_ids & test_ids)
+            train_test_overlap = len(overlap)
+            if overlap:
+                _abort(
+                    Path(args.metrics_out),
+                    (
+                        f"test manifest overlaps training manifest on {len(overlap)} "
+                        f"record id(s); refusing to publish in-sample metrics. "
+                        f"Examples: {overlap[:5]!r}"
+                    ),
+                    {
+                        "train_dataset_hash": train_dataset_hash,
+                        "test_dataset_hash": test_dataset_hash,
+                        "train_test_overlap": len(overlap),
+                    },
+                )
+        else:
+            # The split step is expected to emit the training manifest
+            # alongside the test one; a missing train manifest means we cannot
+            # verify there is no overlap, which is exactly the hazard this gate
+            # exists to stop.
+            _abort(
+                Path(args.metrics_out),
+                (
+                    f"test manifest {test_path} is present but train manifest {train_path} "
+                    f"is missing; cannot verify train/test disjointness."
+                ),
+                {"test_dataset_hash": test_dataset_hash},
+            )
+        if not cleaned:
+            _abort(
+                Path(args.metrics_out),
+                f"test manifest {test_path} is empty; refusing to publish vacuous metrics.",
+                {
+                    "train_dataset_hash": train_dataset_hash,
+                    "test_dataset_hash": test_dataset_hash,
+                },
+            )
+    else:
+        # Legacy path: the quality step did not emit the split. Score over the
+        # cleaned manifest as before, but mark the metrics so downstream
+        # audit sees the degradation. The step still enforces the per-class
+        # floors and missing-image/empty aborts.
+        cleaned = json.loads(cleaned_path.read_text(encoding="utf-8"))
+        print(
+            "[evaluation] WARNING: test_dataset.json not found; evaluating over "
+            f"{cleaned_path.name}. The release gate cannot distinguish in-sample from "
+            "held-out metrics for this run.",
+            file=sys.stderr,
+        )
     labels_sorted = sorted({record["label"] for record in cleaned})
     class_index = {label: i for i, label in enumerate(labels_sorted)}
 
@@ -279,6 +394,9 @@ def main() -> None:
                     "not_done_sample_count": not_done_evaluated,
                     "done_sample_count": done_evaluated,
                     "missing_images": missing_images,
+                    "train_dataset_hash": train_dataset_hash,
+                    "test_dataset_hash": test_dataset_hash,
+                    "train_test_overlap": train_test_overlap,
                 },
             )
         true_idx = class_index[true_label]
@@ -299,6 +417,9 @@ def main() -> None:
         "not_done_sample_count": not_done_evaluated,
         "done_sample_count": done_evaluated,
         "missing_images": missing_images,
+        "train_dataset_hash": train_dataset_hash,
+        "test_dataset_hash": test_dataset_hash,
+        "train_test_overlap": train_test_overlap,
     }
 
     # Fail closed on dataset-shrinking manipulation or vacuous evaluation.
@@ -353,13 +474,18 @@ def main() -> None:
         "done_sample_count": done_evaluated,
         "missing_images": missing_images,
         "classes": labels_sorted,
+        "train_dataset_hash": train_dataset_hash,
+        "test_dataset_hash": test_dataset_hash,
+        "train_test_overlap": train_test_overlap,
     }
     _write_metrics(metrics_out, metrics)
     print(
         f"[evaluation] accuracy={accuracy:.3f} "
         f"emergency_fp_rate={emergency_fp_rate:.3f} latency_ms={latency_ms:.1f} "
         f"n={total} not_done_n={not_done_evaluated} done_n={done_evaluated} "
-        f"missing_images={missing_images}"
+        f"missing_images={missing_images} "
+        f"test_hash={test_dataset_hash[:12] or '<legacy>'} "
+        f"train_hash={train_dataset_hash[:12] or '<legacy>'}"
     )
 
 

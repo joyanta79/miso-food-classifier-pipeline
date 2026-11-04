@@ -94,7 +94,20 @@ def main() -> None:
     output_dir = Path(os.getenv("SM_OUTPUT_DATA_DIR", "/opt/ml/output/data"))
     brand_id = os.environ.get("BRAND_ID", "white-castle")
 
-    cleaned = json.loads((dataset_root / "cleaned_dataset.json").read_text(encoding="utf-8"))
+    # Prefer the held-out train manifest emitted by the quality step so the
+    # EvaluateModel step can score the model on an unseen test manifest. Fall
+    # back to the legacy ``cleaned_dataset.json`` only if the quality step
+    # output predates the split (older artifact), so previously-deployed
+    # quality outputs remain consumable.
+    train_manifest = dataset_root / "train_dataset.json"
+    legacy_manifest = dataset_root / "cleaned_dataset.json"
+    if train_manifest.exists():
+        cleaned = json.loads(train_manifest.read_text(encoding="utf-8"))
+        manifest_source = train_manifest.name
+    else:
+        cleaned = json.loads(legacy_manifest.read_text(encoding="utf-8"))
+        manifest_source = legacy_manifest.name
+    print(f"[train_step] training manifest: {manifest_source} records={len(cleaned)}")
 
     work = Path("/opt/ml/input/prepared")
     _prep_class_dirs(images_root, cleaned, work)
