@@ -365,9 +365,9 @@ def build(
                 "IMAGE_SIZE": str(config["training"]["image_size"]),
                 "DONE_LABEL": str(config["evaluation"].get("done_label", "done")),
                 "NOT_DONE_LABEL": str(config["evaluation"].get("not_done_label", "not_done")),
-                "MIN_SAMPLE_COUNT": str(config["evaluation"].get("min_sample_count", 1)),
+                "MIN_SAMPLE_COUNT": str(config["evaluation"]["min_sample_count"]),
                 "MIN_PER_CLASS_COUNT": str(
-                    config["evaluation"].get("min_per_class_count", 1)
+                    config["evaluation"]["min_per_class_count"]
                 ),
             }
         ).run(
@@ -450,7 +450,7 @@ def build(
                     property_file=eval_metrics,
                     json_path="sample_count",
                 ),
-                right=int(config["evaluation"].get("min_sample_count", 1)),
+                right=int(config["evaluation"]["min_sample_count"]),
             ),
             ConditionGreaterThanOrEqualTo(
                 left=JsonGet(
@@ -458,7 +458,7 @@ def build(
                     property_file=eval_metrics,
                     json_path="not_done_sample_count",
                 ),
-                right=int(config["evaluation"].get("min_per_class_count", 1)),
+                right=int(config["evaluation"]["min_per_class_count"]),
             ),
             ConditionGreaterThanOrEqualTo(
                 left=JsonGet(
@@ -466,7 +466,7 @@ def build(
                     property_file=eval_metrics,
                     json_path="done_sample_count",
                 ),
-                right=int(config["evaluation"].get("min_per_class_count", 1)),
+                right=int(config["evaluation"]["min_per_class_count"]),
             ),
             ConditionLessThanOrEqualTo(
                 left=JsonGet(
