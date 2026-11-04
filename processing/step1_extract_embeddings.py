@@ -29,6 +29,8 @@ from typing import Any
 
 import numpy as np
 
+from processing._manifest_paths import ManifestPathError, resolve_manifest_image
+
 DEFAULT_EMBEDDING_DIM = 1280
 DEFAULT_IMAGE_SIZE = 224
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
@@ -78,13 +80,21 @@ def _load_backbone(image_size: int, weights: str | None):
 
 
 def _resolve_image_path(record: dict[str, Any], image_root: Path | None) -> Path | None:
-    value = record.get("image_path", record.get("key", record.get("id")))
-    if value is None:
+    # Containment check first (reject absolute, ``..``, symlinks, non-regular
+    # files, and anything that resolves outside ``image_root``) and only then
+    # apply the suffix allow-list -- a hostile value such as
+    # ``../../etc/credentials.jpg`` would otherwise satisfy the suffix filter.
+    try:
+        path = resolve_manifest_image(image_root, record, require_exists=True)
+    except ManifestPathError:
+        # Fail closed: a record whose path cannot be resolved safely is
+        # dropped from the EfficientNet fast path. ``_read_local_payload``
+        # below re-validates and raises so the deterministic branch cannot
+        # silently resurrect it either.
         return None
-    path = Path(str(value))
-    if not path.is_absolute() and image_root is not None:
-        path = image_root / path
-    if path.exists() and path.suffix.lower() in _IMAGE_SUFFIXES:
+    if path is None:
+        return None
+    if path.suffix.lower() in _IMAGE_SUFFIXES:
         return path
     return None
 
@@ -112,15 +122,17 @@ def _real_embedding(path: Path, image_size: int, weights: str | None) -> np.ndar
 def _read_local_payload(record: dict[str, Any], image_root: Path | None) -> bytes:
     """Return the raw bytes of the record's image, raising if it cannot be opened.
 
-    Fail-closed: never substitute the filename string for image bytes. If the
-    referenced path does not resolve on disk, raise ``FileNotFoundError`` so the
-    caller can either exclude the record or surface the error to the operator.
+    Fail-closed on two axes:
+
+    * never substitute the filename string for image bytes (if the referenced
+      path does not resolve on disk, raise ``FileNotFoundError``);
+    * never read a path that fails the containment check against
+      ``image_root`` -- an absolute value or a ``..`` traversal would
+      otherwise read any file reachable in the processing container.
     """
-    value = record.get("image_path", record.get("key", record["id"]))
-    path = Path(str(value))
-    if not path.is_absolute() and image_root is not None:
-        path = image_root / path
-    if not path.exists():
+    value = record.get("image_path", record.get("key", record.get("id")))
+    path = resolve_manifest_image(image_root, record, require_exists=False)
+    if path is None or not path.exists():
         raise FileNotFoundError(
             f"Image for record {record.get('id', value)!r} not found at {path!s}; "
             "refusing to substitute the filename string for image bytes."

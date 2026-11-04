@@ -24,6 +24,10 @@ from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, "/opt/ml/input/data/pkgcode")
 
+from processing._manifest_paths import (  # noqa: E402
+    ManifestPathError,
+    resolve_manifest_image,
+)
 from training.train import train_model  # noqa: E402
 
 
@@ -61,8 +65,16 @@ def _prep_class_dirs(
             dest = split_root / label
             dest.mkdir(parents=True, exist_ok=True)
             for record in split:
-                src = images_root / record["image_path"]
-                if not src.exists():
+                try:
+                    src = resolve_manifest_image(
+                        images_root, record, require_exists=False
+                    )
+                except ManifestPathError as exc:
+                    raise ManifestPathError(
+                        f"[train_step] manifest record "
+                        f"{record.get('id', record.get('image_path'))!r} rejected: {exc}"
+                    ) from exc
+                if src is None or not src.exists():
                     # Fail closed: the gate metrics are computed over the
                     # manifest, so a missing source means the materialised
                     # dataset would diverge from what the gates approved.
