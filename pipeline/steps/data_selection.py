@@ -125,6 +125,20 @@ def select(
             continue
         if not fnmatch.fnmatch(path.name, naming_pattern):
             continue
+        # Reject directories and other non-regular entries. SageMaker's
+        # File-mode S3 download materialises an uploader-chosen key such as
+        # ``<brand>/wc_done_0.99.jpg/x.txt`` into a *directory* named
+        # ``wc_done_0.99.jpg`` which otherwise satisfies the suffix and
+        # fnmatch filters above; it has no image bytes, would inflate the
+        # DatasetBoundsGate counters, and would crash downstream readers
+        # (``read_bytes``/``shutil.copy``) with ``IsADirectoryError``.
+        try:
+            if not path.is_file():
+                continue
+            if path.stat().st_size == 0:
+                continue
+        except OSError:
+            continue
         parsed = _parse_name(path)
         if parsed is None:
             continue
