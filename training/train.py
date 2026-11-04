@@ -9,6 +9,7 @@ perform actual model fitting.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -16,6 +17,103 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+CHECKPOINT_MANIFEST_NAME = "checkpoint_manifest.json"
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _current_training_job_name() -> str:
+    """Return the identity of the currently executing training job.
+
+    SageMaker exposes the job name via ``TRAINING_JOB_NAME``. Locally we fall
+    back to an explicit override so tests remain deterministic.
+    """
+    return (
+        os.environ.get("TRAINING_JOB_NAME")
+        or os.environ.get("SM_TRAINING_JOB_NAME")
+        or os.environ.get("CONTINUUM_TRAINING_JOB_NAME")
+        or ""
+    )
+
+
+def _load_checkpoint_manifest(directory: Path) -> dict[str, Any]:
+    manifest_path = directory / CHECKPOINT_MANIFEST_NAME
+    if not manifest_path.is_file():
+        return {"entries": {}}
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8")) or {}
+    except (OSError, json.JSONDecodeError):
+        return {"entries": {}}
+    if not isinstance(data, dict):
+        return {"entries": {}}
+    data.setdefault("entries", {})
+    if not isinstance(data["entries"], dict):
+        data["entries"] = {}
+    return data
+
+
+def _write_checkpoint_manifest(directory: Path, manifest: dict[str, Any]) -> None:
+    manifest_path = directory / CHECKPOINT_MANIFEST_NAME
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _verified_resume_checkpoint(
+    directory: Path,
+    *,
+    training_job_name: str,
+    total_epochs: int,
+) -> Path | None:
+    """Select a resume checkpoint only if it is in the manifest written by *this* job.
+
+    Returns ``None`` when no legitimate resume candidate exists. Raises
+    ``RuntimeError`` when an unverified or out-of-range checkpoint is present,
+    which indicates tampering (e.g. an attacker-planted ``epoch-999.weights.h5``
+    synced into ``SM_CHECKPOINT_DIR``).
+    """
+    candidates = sorted(
+        Path(directory).glob("epoch-*.weights.h5"), key=checkpoint_epoch
+    )
+    if not candidates:
+        return None
+    manifest = _load_checkpoint_manifest(Path(directory))
+    entries: dict[str, Any] = manifest.get("entries", {})
+    best: Path | None = None
+    for candidate in candidates:
+        epoch = checkpoint_epoch(candidate)
+        if epoch <= 0 or epoch >= total_epochs:
+            raise RuntimeError(
+                f"Refusing to resume: checkpoint {candidate.name!r} has epoch {epoch} "
+                f"outside the valid range (1..{total_epochs - 1})."
+            )
+        entry = entries.get(candidate.name)
+        if not isinstance(entry, dict):
+            raise RuntimeError(
+                f"Refusing to resume: checkpoint {candidate.name!r} is not in the "
+                "manifest produced by this training job."
+            )
+        expected_job = entry.get("training_job_name", "")
+        if not training_job_name or expected_job != training_job_name:
+            raise RuntimeError(
+                f"Refusing to resume: checkpoint {candidate.name!r} was written by "
+                f"job {expected_job!r}, not the current job {training_job_name!r}."
+            )
+        expected_sha = entry.get("sha256", "")
+        actual_sha = _file_sha256(candidate)
+        if not expected_sha or expected_sha != actual_sha:
+            raise RuntimeError(
+                f"Refusing to resume: checkpoint {candidate.name!r} digest mismatch "
+                f"(expected {expected_sha!r}, got {actual_sha!r})."
+            )
+        best = candidate
+    return best
 
 
 def load_config(config_path: str | Path) -> dict[str, Any]:
@@ -150,15 +248,33 @@ def train_model(
     )
 
     checkpoint_path.mkdir(parents=True, exist_ok=True)
-    checkpoint = latest_checkpoint(checkpoint_path)
+    training_job_name = _current_training_job_name()
+    checkpoint = _verified_resume_checkpoint(
+        checkpoint_path,
+        training_job_name=training_job_name,
+        total_epochs=total_epochs,
+    )
     initial_epoch = checkpoint_epoch(checkpoint)
+    if initial_epoch >= total_epochs:
+        raise RuntimeError(
+            f"Refusing to resume: initial_epoch={initial_epoch} is not less than "
+            f"total_epochs={total_epochs}; no training would occur."
+        )
     if checkpoint:
         model.load_weights(checkpoint)
 
     class PeriodicCheckpoint(tf.keras.callbacks.Callback):
         def on_epoch_end(self, epoch: int, logs: dict[str, float] | None = None) -> None:
             if (epoch + 1) % checkpoint_every == 0:
-                self.model.save_weights(checkpoint_path / f"epoch-{epoch + 1:03d}.weights.h5")
+                weight_path = checkpoint_path / f"epoch-{epoch + 1:03d}.weights.h5"
+                self.model.save_weights(weight_path)
+                manifest = _load_checkpoint_manifest(checkpoint_path)
+                manifest["entries"][weight_path.name] = {
+                    "sha256": _file_sha256(weight_path),
+                    "training_job_name": training_job_name,
+                    "epoch": epoch + 1,
+                }
+                _write_checkpoint_manifest(checkpoint_path, manifest)
 
     history = model.fit(
         train_ds.prefetch(tf.data.AUTOTUNE),
