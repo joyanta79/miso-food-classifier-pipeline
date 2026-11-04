@@ -1009,6 +1009,250 @@ def _walk_steps(steps: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     return flattened
 
 
+# Fail-closed release topology. Each gate's ElseSteps must contain exactly its
+# paired Fail step (and nothing else); the gate's downstream work (processing /
+# training / RegisterModel and any nested gate) must appear only in its IfSteps.
+# The gate chain itself is strictly nested: DatasetBoundsGate -> CleanlabQualityGate
+# -> DriftGate -> EvaluateModelQualityGate -> RegisterModelPendingManualApproval.
+_GATE_FAIL_PAIRS: tuple[tuple[str, str], ...] = (
+    ("DatasetBoundsGate", "FailDatasetBounds"),
+    ("CleanlabQualityGate", "FailCleanlabQuality"),
+    ("DriftGate", "FailDriftGate"),
+    ("EvaluateModelQualityGate", "FailEvaluationGate"),
+)
+_FAIL_STEPS: frozenset[str] = frozenset(fail for _, fail in _GATE_FAIL_PAIRS)
+_REGISTER_STEP_NAME = "RegisterModelPendingManualApproval"
+# Downstream (non-gate) work that must appear only inside the IfSteps subtree of
+# the paired gate -- never in any ElseSteps and never at the top level after
+# ``SelectRecentBrandData``/``DatasetBoundsGate``.
+_GATE_REQUIRED_IF_WORK: Mapping[str, frozenset[str]] = {
+    "DatasetBoundsGate": frozenset({"EmbedAndDeduplicate", "KFoldCleanlabQuality"}),
+    "CleanlabQualityGate": frozenset({"DetectDrift"}),
+    "DriftGate": frozenset({"TrainBrandClassifier", "EvaluateModel"}),
+    "EvaluateModelQualityGate": frozenset(),
+}
+
+
+def _step_name(step: Mapping[str, Any]) -> str:
+    name = step.get("Name")
+    return name if isinstance(name, str) else "<unnamed>"
+
+
+def _is_register_step(
+    step: Mapping[str, Any], *, register_name_prefix: bool
+) -> bool:
+    name = _step_name(step)
+    if step.get("Type") == "RegisterModel":
+        return True
+    if register_name_prefix:
+        return name.startswith(_REGISTER_STEP_NAME)
+    return name == _REGISTER_STEP_NAME
+
+
+def _validate_fail_closed_topology(
+    definition: Mapping[str, Any],
+    *,
+    register_name_prefix: bool = False,
+) -> None:
+    """Assert the fail-closed release graph documented in docs/ARCHITECTURE.md.
+
+    * Each safety gate's ElseSteps must contain exactly its paired Fail step and
+      no processing / training / RegisterModel / Condition step.
+    * Each gate's downstream work (the next gate and its sibling processing /
+      training steps) must appear only in that gate's IfSteps.
+    * ``RegisterModelPendingManualApproval`` must be reachable only through
+      ``EvaluateModelQualityGate``'s IfSteps nested inside
+      ``DriftGate`` -> ``CleanlabQualityGate`` -> ``DatasetBoundsGate``.
+    * Every Fail step must be the sole ElseSteps leaf of its paired gate.
+
+    ``register_name_prefix`` lets the SDK validator accept the RegisterModel
+    step collection, which expands into a step whose name is prefixed with
+    ``RegisterModelPendingManualApproval``.
+    """
+    top_level = list(definition.get("Steps", []))
+    top_level_names = [_step_name(step) for step in top_level]
+
+    # 1. Fail steps and the Register step must never appear at the top level;
+    #    they must be nested under their paired gate.
+    for forbidden in _FAIL_STEPS:
+        if forbidden in top_level_names:
+            raise ValueError(
+                f"Fail step {forbidden!r} must appear only inside its paired "
+                f"gate's ElseSteps, not at the top level of the pipeline."
+            )
+    for step in top_level:
+        if _is_register_step(step, register_name_prefix=register_name_prefix):
+            raise ValueError(
+                f"{_REGISTER_STEP_NAME!r} must be reachable only through "
+                f"EvaluateModelQualityGate's IfSteps nested inside DriftGate "
+                f"-> CleanlabQualityGate -> DatasetBoundsGate; found at the "
+                f"top level as {_step_name(step)!r}."
+            )
+    dataset_gate = next(
+        (step for step in top_level if _step_name(step) == "DatasetBoundsGate"),
+        None,
+    )
+    if dataset_gate is None or dataset_gate.get("Type") != "Condition":
+        raise ValueError(
+            "DatasetBoundsGate must appear as a top-level Condition step; "
+            "the fail-closed release chain starts there."
+        )
+
+    # 2. Walk the expected chain and assert the paired Fail step is the sole
+    #    ElseSteps leaf, nested gates sit inside IfSteps, and no forbidden step
+    #    leaks into any ElseSteps subtree.
+    seen_fail_steps: set[str] = set()
+    seen_register = False
+
+    def _assert_no_forbidden_in_else(
+        else_steps: list[Mapping[str, Any]], gate_name: str, fail_name: str
+    ) -> None:
+        for descendant in _walk_steps(else_steps):
+            descendant_name = _step_name(descendant)
+            descendant_type = descendant.get("Type", "")
+            if descendant_name == fail_name and descendant_type == "Fail":
+                continue
+            if _is_register_step(
+                descendant, register_name_prefix=register_name_prefix
+            ):
+                raise ValueError(
+                    f"Gate {gate_name!r} ElseSteps must not contain the model "
+                    f"registration step; found {descendant_name!r}."
+                )
+            if descendant_type == "Condition":
+                raise ValueError(
+                    f"Gate {gate_name!r} ElseSteps must not contain nested "
+                    f"Condition gates; found {descendant_name!r}."
+                )
+            raise ValueError(
+                f"Gate {gate_name!r} ElseSteps must contain only its paired "
+                f"Fail step {fail_name!r}; found {descendant_name!r} of type "
+                f"{descendant_type!r}."
+            )
+
+    current_gate: Mapping[str, Any] | None = dataset_gate
+    for index, (gate_name, fail_name) in enumerate(_GATE_FAIL_PAIRS):
+        if current_gate is None or _step_name(current_gate) != gate_name:
+            found = "<missing>" if current_gate is None else _step_name(current_gate)
+            raise ValueError(
+                f"Expected {gate_name!r} at depth {index} of the fail-closed "
+                f"chain; found {found!r}. The required nesting is "
+                f"DatasetBoundsGate -> CleanlabQualityGate -> DriftGate -> "
+                f"EvaluateModelQualityGate."
+            )
+        if current_gate.get("Type") != "Condition":
+            raise ValueError(f"{gate_name!r} must be a Condition step.")
+        arguments = current_gate.get("Arguments", {})
+        if_steps = list(arguments.get("IfSteps", []))
+        else_steps = list(arguments.get("ElseSteps", []))
+
+        # ElseSteps must be exactly the paired Fail step and nothing else.
+        if len(else_steps) != 1:
+            raise ValueError(
+                f"Gate {gate_name!r} ElseSteps must contain exactly its paired "
+                f"Fail step {fail_name!r}; found {len(else_steps)} step(s)."
+            )
+        else_leaf = else_steps[0]
+        if (
+            _step_name(else_leaf) != fail_name
+            or else_leaf.get("Type") != "Fail"
+        ):
+            raise ValueError(
+                f"Gate {gate_name!r} ElseSteps must be the paired Fail step "
+                f"{fail_name!r} (Type 'Fail'); found "
+                f"{_step_name(else_leaf)!r} of type "
+                f"{else_leaf.get('Type')!r}."
+            )
+        _assert_no_forbidden_in_else(else_steps, gate_name, fail_name)
+        if fail_name in seen_fail_steps:
+            raise ValueError(
+                f"Fail step {fail_name!r} appears more than once in the graph."
+            )
+        seen_fail_steps.add(fail_name)
+
+        # The paired downstream processing/training work must be direct
+        # IfSteps children, not hoisted out of the gate.
+        required_work = _GATE_REQUIRED_IF_WORK[gate_name]
+        if_direct_names = {_step_name(step) for step in if_steps}
+        missing_work = required_work.difference(if_direct_names)
+        if missing_work:
+            raise ValueError(
+                f"Gate {gate_name!r} IfSteps must contain its downstream "
+                f"work; missing {sorted(missing_work)}."
+            )
+
+        # No Fail step may sit in this gate's IfSteps.
+        for if_child in if_steps:
+            child_name = _step_name(if_child)
+            child_type = if_child.get("Type", "")
+            if child_type == "Fail" or child_name in _FAIL_STEPS:
+                raise ValueError(
+                    f"Gate {gate_name!r} IfSteps must not contain a Fail step; "
+                    f"found {child_name!r}."
+                )
+
+        # Advance to the next gate in the chain, or (for the terminal gate)
+        # assert the Register step is its sole IfSteps child.
+        if index + 1 < len(_GATE_FAIL_PAIRS):
+            next_gate_name = _GATE_FAIL_PAIRS[index + 1][0]
+            next_gate = next(
+                (step for step in if_steps if _step_name(step) == next_gate_name),
+                None,
+            )
+            if next_gate is None:
+                raise ValueError(
+                    f"Gate {gate_name!r} IfSteps must contain the nested gate "
+                    f"{next_gate_name!r} to enforce the fail-closed chain."
+                )
+            current_gate = next_gate
+        else:
+            register_children = [
+                step
+                for step in if_steps
+                if _is_register_step(
+                    step, register_name_prefix=register_name_prefix
+                )
+            ]
+            if len(register_children) != 1:
+                raise ValueError(
+                    f"Gate {gate_name!r} IfSteps must contain exactly the "
+                    f"{_REGISTER_STEP_NAME!r} step; found "
+                    f"{len(register_children)}."
+                )
+            if len(if_steps) != 1:
+                extras = sorted(
+                    _step_name(s)
+                    for s in if_steps
+                    if s is not register_children[0]
+                )
+                raise ValueError(
+                    f"Gate {gate_name!r} IfSteps must contain only the "
+                    f"{_REGISTER_STEP_NAME!r} step; found extra steps "
+                    f"{extras}."
+                )
+            seen_register = True
+            current_gate = None
+
+    if not seen_register:
+        raise ValueError(
+            f"{_REGISTER_STEP_NAME!r} must be reachable through the gate chain."
+        )
+
+    # 3. Final sweep: every Fail step must have been consumed as an ElseSteps
+    #    leaf, and must have Type 'Fail' wherever it appears in the graph.
+    missing_fails = _FAIL_STEPS.difference(seen_fail_steps)
+    if missing_fails:
+        raise ValueError(
+            f"Fail-closed topology missing paired Fail steps: {sorted(missing_fails)}."
+        )
+    for step in _walk_steps(top_level):
+        name = _step_name(step)
+        if name in _FAIL_STEPS and step.get("Type") != "Fail":
+            raise ValueError(
+                f"Step {name!r} must have Type 'Fail'; got {step.get('Type')!r}."
+            )
+
+
 def validate_dry_run_definition(
     definition: Mapping[str, Any],
     config: Mapping[str, Any] | None = None,
@@ -1047,6 +1291,9 @@ def validate_dry_run_definition(
         raise ValueError(f"Local DAG is missing required steps: {sorted(missing)}")
     if len(names) != len(set(names)):
         raise ValueError("Local DAG contains duplicate step names")
+
+    # Fail-closed topology: assert the branch graph, not just the step inventory.
+    _validate_fail_closed_topology(definition)
 
     parameters = {item["Name"]: item for item in definition.get("Parameters", [])}
     for parameter in (
@@ -1680,6 +1927,12 @@ def validate_sdk_pipeline_definition(definition: str | Mapping[str, Any]) -> Non
     missing = required.difference(names)
     if missing:
         raise ValueError(f"SDK pipeline is missing required steps: {sorted(missing)}")
+
+    # Fail-closed topology: assert the branch graph, not just the step inventory.
+    # The SDK's RegisterModel step collection expands into a step whose name is
+    # prefixed with ``RegisterModelPendingManualApproval`` (with an SDK-generated
+    # suffix), so match on prefix in the SDK path.
+    _validate_fail_closed_topology(parsed, register_name_prefix=True)
 
     by_name = {step["Name"]: step for step in flattened}
     for gate_name, expected_count in _EXPECTED_GATE_CONDITION_COUNTS.items():
