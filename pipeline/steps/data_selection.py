@@ -36,6 +36,7 @@ import argparse
 import fnmatch
 import json
 import os
+import re
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -45,6 +46,27 @@ from typing import Any
 UTC = timezone.utc
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 _WILDCARD_CHARS = frozenset("*?[")
+# A label is used downstream as a filesystem directory component (see
+# pipeline/steps/train_step.py: ``dest = split_root / label``). Constrain it
+# to a strict, single safe path component so attacker-controlled filenames
+# (e.g. ``wc_.._0.1.jpg`` -> label ``".."``, ``wc__0.1.jpg`` -> label ``""``)
+# cannot escape the prepared class-directory tree or silently alias to the
+# split root. The pattern mirrors the mitigation guidance on the finding.
+_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
+
+
+def _is_safe_label(label: str) -> bool:
+    """Return True when ``label`` is safe to use as a class directory name.
+
+    Guarantees enforced:
+    * non-empty, bounded length;
+    * no path separators, ``.`` / ``..`` traversal tokens, NULs or other
+      control characters;
+    * matches the strict allow-list pattern ``^[A-Za-z0-9][A-Za-z0-9-]{0,63}$``.
+    """
+    if not isinstance(label, str):
+        return False
+    return bool(_LABEL_PATTERN.fullmatch(label))
 
 
 def _parse_name(path: Path) -> tuple[str, str, str] | None:
@@ -134,6 +156,14 @@ def select(
         # configured naming pattern -- otherwise an uploader who guesses
         # another brand's convention can poison this brand's dataset.
         if brand != expected_brand:
+            continue
+        # The label is attacker-controlled and is later used verbatim as a
+        # filesystem directory component in the training container
+        # (pipeline/steps/train_step.py: ``dest = split_root / label``).
+        # Reject anything that is not a safe single path component so that
+        # ``.``, ``..``, the empty string and control characters cannot
+        # become class names and escape the prepared class-directory tree.
+        if not _is_safe_label(label):
             continue
         # Record the path relative to ``image_root`` as a POSIX string so that
         # discovery (``rglob``) and resolution (``images_root / image_path``)
