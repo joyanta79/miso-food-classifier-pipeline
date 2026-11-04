@@ -103,7 +103,6 @@ def test_eventbridge_trigger_starts_brand_pipeline(config: dict[str, Any]) -> No
     call = sagemaker.calls[0]
     assert call["PipelineName"] == "miso-food-classifier-brand-b"
     assert call["PipelineParameters"] == [
-        {"Name": "BrandId", "Value": "brand-b"},
         {"Name": "TriggerSource", "Value": "s3"},
     ]
     # Deterministic display name is attached so retries inside the throttle
@@ -173,7 +172,7 @@ def test_manual_trigger_accepts_json_body(config: dict[str, Any]) -> None:
 
     assert result["trigger"] == "manual"
     assert sagemaker.calls[0]["PipelineName"] == "miso-food-classifier-white-castle"
-    assert sagemaker.calls[0]["PipelineParameters"][1] == {
+    assert sagemaker.calls[0]["PipelineParameters"][0] == {
         "Name": "TriggerSource",
         "Value": "manual",
     }

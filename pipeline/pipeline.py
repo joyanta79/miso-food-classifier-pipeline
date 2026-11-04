@@ -140,9 +140,11 @@ def _parameter(name: str, value: Any, description: str) -> dict[str, Any]:
 
 
 # Infrastructure-identity names that MUST NOT be exposed as pipeline parameters.
-# These are deployment facts (role ARN, buckets the pipeline role is scoped to) --
-# not per-execution inputs. Baking them in as literals removes the
-# StartPipelineExecution code-channel / role-override hijack path (CWE-494).
+# These are deployment facts (role ARN, buckets the pipeline role is scoped to,
+# and the brand-identity triple that decides which tenant owns the released
+# model) -- not per-execution inputs. Baking them in as literals removes the
+# StartPipelineExecution code-channel / role-override hijack path (CWE-494) and
+# the cross-brand Model Registry hijack path (CWE-639).
 FORBIDDEN_PARAMETER_NAMES = frozenset(
     {
         "SageMakerRoleArn",
@@ -150,6 +152,15 @@ FORBIDDEN_PARAMETER_NAMES = frozenset(
         "ModelArtifactsBucket",
         "PipelineArtifactsBucket",
         "RawArchiveBucket",
+        # Brand-identity triple: the one value (ModelPackageGroup) that decides
+        # which tenant owns the registered model package, plus the BrandId /
+        # BrandNamingPattern used to curate and tag it. These must be build-time
+        # literals so a StartPipelineExecution caller cannot register a model
+        # into another brand's Model Package Group or forge the brand_id
+        # metadata on the published package (CWE-639).
+        "BrandId",
+        "BrandNamingPattern",
+        "ModelPackageGroup",
     }
 )
 
@@ -174,13 +185,14 @@ def build_parameters(config: Mapping[str, Any], brand: Brand) -> list[dict[str, 
     values = [
         ("Region", aws["region"], "AWS Region hosting this pipeline."),
         ("AccountId", aws["account_id"], "Target AWS account identifier."),
-        ("BrandId", brand.id, "Fixed pipeline brand identifier."),
-        ("BrandNamingPattern", brand.naming_pattern, "Allowed raw-data filename prefix pattern."),
-        (
-            "ModelPackageGroup",
-            brand.model_package_group,
-            "Brand-specific SageMaker Model Registry package group.",
-        ),
+        # NOTE: BrandId, BrandNamingPattern and ModelPackageGroup are deliberately
+        # NOT exposed as pipeline parameters. They are the brand-identity triple
+        # that decides which tenant owns the released model, and they must be
+        # baked as literals into the definition so a caller with
+        # sagemaker:StartPipelineExecution cannot redirect the registered model
+        # package into another brand's Model Package Group, forge the brand_id
+        # metadata property, or change which filenames the curation step
+        # accepts (CWE-639).
         ("RecencyMonths", selection["recency_months"], "Maximum image age to select."),
         # NOTE: MinImagesPerClass, TargetDatasetMin, and TargetDatasetMax are deliberately
         # NOT exposed as pipeline parameters. They are safety-critical gate thresholds and
@@ -421,9 +433,13 @@ def build_dry_run_definition(
             },
         ],
         {
+            # Brand identity is injected as literals (not parameter references) so
+            # a StartPipelineExecution PipelineParameters override cannot change
+            # which brand prefix / filename pattern the curation step accepts
+            # (CWE-639).
+            "BRAND_ID": _literal_env_value(brand.id),
+            "NAMING_PATTERN": _literal_env_value(brand.naming_pattern),
             **_environment(
-                ("BRAND_ID", "BrandId"),
-                ("NAMING_PATTERN", "BrandNamingPattern"),
                 ("RECENCY_MONTHS", "RecencyMonths"),
                 ("SEED", "Seed"),
             ),
@@ -649,7 +665,7 @@ def build_dry_run_definition(
                 "image_size": _ref("ImageSize"),
                 "seed": _ref("Seed"),
             },
-            "Tags": [{"Key": "brand", "Value": _ref("BrandId")}],
+            "Tags": [{"Key": "brand", "Value": brand.id}],
         },
     }
 
@@ -718,7 +734,12 @@ def build_dry_run_definition(
         "Name": "RegisterModelPendingManualApproval",
         "Type": "RegisterModel",
         "Arguments": {
-            "ModelPackageGroupName": _ref("ModelPackageGroup"),
+            # ModelPackageGroupName is baked in as a literal (not a
+            # ``{"Get": "Parameters.ModelPackageGroup"}`` reference) so a caller
+            # with sagemaker:StartPipelineExecution cannot redirect the
+            # registered model package into another brand's Model Package Group
+            # (CWE-639).
+            "ModelPackageGroupName": brand.model_package_group,
             "ModelApprovalStatus": "PendingManualApproval",
             "InferenceSpecification": {
                 "Containers": [
@@ -748,7 +769,10 @@ def build_dry_run_definition(
                 }
             },
             "CustomerMetadataProperties": {
-                "brand_id": _ref("BrandId"),
+                # brand_id is a literal so the CustomerMetadataProperties
+                # provenance on the published package cannot be forged by a
+                # StartPipelineExecution override.
+                "brand_id": brand.id,
                 "review_topic_arn": _ref("ReviewTopicArn"),
                 "ml_lead_topic_arn": _ref("MlLeadTopicArn"),
                 "vp_engineering_topic_arn": _ref("VpEngineeringTopicArn"),
@@ -1050,9 +1074,6 @@ def validate_dry_run_definition(
 
     parameters = {item["Name"]: item for item in definition.get("Parameters", [])}
     for parameter in (
-        "BrandId",
-        "BrandNamingPattern",
-        "ModelPackageGroup",
         "UseSpot",
         "Seed",
     ):
@@ -1097,9 +1118,11 @@ def validate_dry_run_definition(
             f"as execution parameters: {sorted(forbidden)}"
         )
 
-    # Every RoleArn and every code-channel S3Uri must be a literal string --
-    # no ``Get: Parameters.*`` indirection -- so a PipelineParameters override
-    # cannot swap in an attacker role or an attacker code bucket.
+    # Every RoleArn, every code-channel S3Uri and every RegisterModel
+    # ModelPackageGroupName must be a literal string -- no ``Get: Parameters.*``
+    # indirection -- so a PipelineParameters override cannot swap in an
+    # attacker role, an attacker code bucket, or another brand's Model Package
+    # Group (CWE-494, CWE-639).
     def _walk(node: Any, path: str = "$") -> None:
         if isinstance(node, Mapping):
             role = node.get("RoleArn") if "RoleArn" in node else None
@@ -1107,6 +1130,15 @@ def validate_dry_run_definition(
                 raise ValueError(
                     f"RoleArn at {path} must be a literal string; found parameter reference"
                 )
+            if "ModelPackageGroupName" in node:
+                group = node.get("ModelPackageGroupName")
+                if not isinstance(group, str) or not group:
+                    raise ValueError(
+                        f"ModelPackageGroupName at {path} must be a literal non-empty "
+                        "string; parameterised Model Package Groups let a "
+                        "StartPipelineExecution caller redirect the registered model "
+                        "into another brand's registry"
+                    )
             if (
                 node.get("InputName") == "pipeline-code"
                 and isinstance(node.get("S3Input"), Mapping)
@@ -1137,9 +1169,18 @@ def validate_dry_run_definition(
     _walk(definition)
 
     if config is not None:
-        brand_id = parameters["BrandId"].get("DefaultValue")
-        naming_pattern = parameters["BrandNamingPattern"].get("DefaultValue")
-        model_package_group = parameters["ModelPackageGroup"].get("DefaultValue")
+        # Brand identity is baked into the definition as literals, not as
+        # parameters. Read the authoritative values from the pipeline Metadata
+        # (BrandId), the SelectRecentBrandData container environment
+        # (NAMING_PATTERN) and the RegisterModel step
+        # (ModelPackageGroupName), and verify they agree with the brand
+        # declared in ``config.yaml``.
+        metadata = definition.get("Metadata", {}) if isinstance(definition.get("Metadata"), Mapping) else {}
+        brand_id = metadata.get("BrandId")
+        if not isinstance(brand_id, str) or not brand_id:
+            raise ValueError(
+                "Pipeline definition Metadata.BrandId must be a literal non-empty string"
+            )
         try:
             declared = get_brand(config, brand_id)
         except ValueError as error:
@@ -1147,13 +1188,49 @@ def validate_dry_run_definition(
                 f"Pipeline definition declares BrandId {brand_id!r} which is not "
                 f"present in config.yaml"
             ) from error
-        if naming_pattern != declared.naming_pattern:
+
+        select_step = next(
+            (
+                step
+                for step in _walk_steps(definition["Steps"])
+                if step.get("Name") == "SelectRecentBrandData"
+            ),
+            None,
+        )
+        environment: Mapping[str, Any] = {}
+        if select_step is not None:
+            environment = select_step.get("Arguments", {}).get("Environment", {})
+        if not isinstance(environment, Mapping):
+            environment = {}
+        env_brand_id = environment.get("BRAND_ID")
+        naming_pattern = environment.get("NAMING_PATTERN")
+        if not isinstance(env_brand_id, str) or env_brand_id != brand_id:
+            raise ValueError(
+                f"SelectRecentBrandData BRAND_ID environment literal must equal "
+                f"{brand_id!r}; got {env_brand_id!r}. Brand identity must be baked "
+                "in as a literal, not a parameter reference."
+            )
+        if not isinstance(naming_pattern, str) or naming_pattern != declared.naming_pattern:
             raise ValueError(
                 f"BrandNamingPattern {naming_pattern!r} does not match brand "
                 f"{brand_id!r} (expected {declared.naming_pattern!r}). This usually "
                 f"means a single-brand baseline was cloned without substituting "
                 f"brand-specific tokens."
             )
+
+        register_step_for_group = next(
+            (
+                step
+                for step in _walk_steps(definition["Steps"])
+                if step.get("Name") == "RegisterModelPendingManualApproval"
+            ),
+            None,
+        )
+        model_package_group = (
+            register_step_for_group.get("Arguments", {}).get("ModelPackageGroupName")
+            if register_step_for_group is not None
+            else None
+        )
         if model_package_group != declared.model_package_group:
             raise ValueError(
                 f"ModelPackageGroup {model_package_group!r} does not match brand "
