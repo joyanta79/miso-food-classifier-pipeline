@@ -46,8 +46,9 @@ from sagemaker.workflow.conditions import (
     ConditionGreaterThanOrEqualTo,
     ConditionLessThanOrEqualTo,
 )
+from sagemaker.workflow.execution_variables import ExecutionVariables
 from sagemaker.workflow.fail_step import FailStep
-from sagemaker.workflow.functions import JsonGet
+from sagemaker.workflow.functions import Join, JsonGet
 from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.workflow.properties import PropertyFile
@@ -126,11 +127,12 @@ def build(
     archive to the same prefix (``s3:prefix`` IAM condition) to prevent
     cross-brand data mixing (CWE-639).
     """
-    from pipeline.pipeline import get_brand  # noqa: WPS433 (lazy, see load_config)
+    from pipeline.pipeline import _s3_uri, get_brand  # noqa: WPS433 (lazy, see load_config)
 
     region = config["aws"]["region"]
     role = config["aws"]["sagemaker_role_arn"]
     bucket = config["s3"]["pipeline_artifacts_bucket"]
+    model_artifacts_bucket = config["s3"]["model_artifacts_bucket"]
     first_brand_id = config["brands"][0]["id"]
     # Validate the brand against the declared registry group (refuses arbitrary
     # package-group combinations) instead of trusting config["brands"][0] blindly.
@@ -140,8 +142,27 @@ def build(
     sel = config["data_selection"]
     session = PipelineSession()
 
-    base = f"s3://{bucket}/miso-smoke"
-    code_channel = f"{base}/{code_prefix}"
+    # Scope every ProcessingOutput / property-file destination by brand *and*
+    # by the live SageMaker execution id so two brands or two concurrent runs
+    # (e.g. a smoke run started while a production execution is in flight)
+    # can never read or overwrite each other's dataset or metrics.json
+    # objects. The relaxed/smoke decision drives the top-level prefix so a
+    # smoke overlay still cannot land under the production prefix even if the
+    # same pipeline_artifacts_bucket is shared with production. The code
+    # channel stays per-brand but execution-independent so a single upload
+    # can back many executions. The sibling DAG in pipeline.pipeline uses the
+    # same per-brand contract via ``_s3_uri`` (see docs/ARCHITECTURE.md:33).
+    is_relaxed = bool(_relaxed_fields(config))
+    brand_root = (
+        _s3_uri(bucket, brand_id, "smoke") if is_relaxed else _s3_uri(bucket, brand_id)
+    ).rstrip("/")
+    execution_id = ExecutionVariables.PIPELINE_EXECUTION_ID
+
+    def _run_uri(*parts: str) -> Join:
+        # Returns s3://<bucket>/<brand_id>[/smoke]/<ExecutionId>/<parts...>
+        return Join(on="/", values=[brand_root, execution_id, *parts])
+
+    code_channel = _s3_uri(bucket, brand_id, code_prefix).rstrip("/")
 
     tf_image = retrieve(
         framework="tensorflow",
@@ -182,7 +203,7 @@ def build(
         name="SelectRecentBrandData",
         step_args=processor(
             {
-                "NAMING_PATTERN": brand["naming_pattern"],
+                "NAMING_PATTERN": brand.naming_pattern,
                 "MIN_IMAGES_PER_CLASS": str(sel["min_images_per_class"]),
                 "TARGET_DATASET_MIN": str(sel["target_dataset_min"]),
                 "TARGET_DATASET_MAX": str(sel["target_dataset_max"]),
@@ -194,12 +215,12 @@ def build(
                 ProcessingOutput(
                     output_name="sel_dataset",
                     source="/opt/ml/processing/output/dataset",
-                    destination=f"{base}/pipe/select/dataset",
+                    destination=_run_uri("pipe", "select", "dataset"),
                 ),
                 ProcessingOutput(
                     output_name="sel_metrics",
                     source="/opt/ml/processing/output/metrics",
-                    destination=f"{base}/pipe/select/metrics",
+                    destination=_run_uri("pipe", "select", "metrics"),
                 ),
             ],
         ),
@@ -232,7 +253,7 @@ def build(
                 ProcessingOutput(
                     output_name="embed_dataset",
                     source="/opt/ml/processing/output/dataset",
-                    destination=f"{base}/pipe/embed/dataset",
+                    destination=_run_uri("pipe", "embed", "dataset"),
                 )
             ],
         ),
@@ -270,12 +291,12 @@ def build(
                 ProcessingOutput(
                     output_name="quality_dataset",
                     source="/opt/ml/processing/output/dataset",
-                    destination=f"{base}/pipe/quality/dataset",
+                    destination=_run_uri("pipe", "quality", "dataset"),
                 ),
                 ProcessingOutput(
                     output_name="quality_metrics",
                     source="/opt/ml/processing/output/metrics",
-                    destination=f"{base}/pipe/quality/metrics",
+                    destination=_run_uri("pipe", "quality", "metrics"),
                 ),
             ],
         ),
@@ -318,7 +339,7 @@ def build(
                 ProcessingOutput(
                     output_name="drift_metrics",
                     source="/opt/ml/processing/output/metrics",
-                    destination=f"{base}/pipe/drift/metrics",
+                    destination=_run_uri("pipe", "drift", "metrics"),
                 )
             ],
         ),
@@ -331,7 +352,11 @@ def build(
         role=role,
         instance_count=1,
         instance_type=config["training"]["instance_type"],
-        output_path=f"{base}/pipe/train",
+        # Model artifacts must land in the versioned model-artifacts bucket
+        # under the brand prefix -- see pipeline.pipeline (:665) and
+        # docs/ARCHITECTURE.md. Keep brand-scoped but *not* execution-scoped
+        # here because SageMaker Training appends a per-job subfolder.
+        output_path=_s3_uri(model_artifacts_bucket, brand_id).rstrip("/"),
         sagemaker_session=session,
         base_job_name="miso-train",
         entry_point=str(STEPS_DIR / "train_step.py"),
@@ -392,7 +417,7 @@ def build(
                 ProcessingOutput(
                     output_name="eval_metrics",
                     source="/opt/ml/processing/output/metrics",
-                    destination=f"{base}/pipe/eval/metrics",
+                    destination=_run_uri("pipe", "eval", "metrics"),
                 )
             ],
         ),
