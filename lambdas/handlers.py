@@ -217,6 +217,31 @@ def _pipeline_execution_display_name(
     return f"brand-{safe_brand}-{bucket}-{digest}"
 
 
+def _pipeline_execution_client_request_token(
+    brand_id: str, pipeline_name: str, now: float | None = None
+) -> str:
+    """Deterministic SageMaker ``ClientRequestToken`` for the current window.
+
+    SageMaker treats ``StartPipelineExecution`` as idempotent per
+    ``ClientRequestToken``: two concurrent starts carrying the same token
+    collapse to a single pipeline execution server-side, closing the TOCTOU
+    race between the in-flight guard (which reads ``list_pipeline_executions``)
+    and the subsequent ``start_pipeline_execution`` call. Keyed on the same
+    (pipeline, brand, time-bucket) triple as the display name so retries
+    inside one throttle window all converge on one execution.
+
+    Format constraints: 1-128 chars, must start with an alphanumeric and
+    otherwise only contain alphanumerics and hyphens
+    (pattern ``^[a-zA-Z0-9](-*[a-zA-Z0-9]){0,127}$``).
+    """
+    window = _idempotency_window_seconds()
+    bucket = int((now if now is not None else time.time()) // window)
+    digest = hashlib.sha256(
+        f"{pipeline_name}:{brand_id}:{bucket}".encode()
+    ).hexdigest()[:40]
+    return f"miso-{bucket}-{digest}"
+
+
 def _has_in_flight_execution(sagemaker: Any, pipeline_name: str, brand_id: str) -> bool:
     """Return True if a pipeline execution for ``brand_id`` is already running.
 
@@ -287,15 +312,25 @@ def eventbridge_trigger_handler(
         }
 
     display_name = _pipeline_execution_display_name(brand_id, pipeline_name)
+    client_request_token = _pipeline_execution_client_request_token(
+        brand_id, pipeline_name
+    )
     try:
         response = sagemaker.start_pipeline_execution(
             PipelineName=pipeline_name,
             PipelineParameters=_pipeline_parameters(brand_id, trigger, resolved_config),
             PipelineExecutionDisplayName=display_name,
+            # Server-side idempotency: closes the TOCTOU race between the
+            # local in-flight check above and this start. Two concurrent
+            # Lambda invocations in the same throttle window send the same
+            # token, so SageMaker collapses the duplicate start instead of
+            # launching a second GPU training job.
+            ClientRequestToken=client_request_token,
         )
     except TypeError:
         # Test doubles / older clients that do not accept the idempotency
-        # kwarg still work; the display name is then best-effort only.
+        # kwargs still work; display name and request token are then
+        # best-effort only.
         response = sagemaker.start_pipeline_execution(
             PipelineName=pipeline_name,
             PipelineParameters=_pipeline_parameters(brand_id, trigger, resolved_config),
