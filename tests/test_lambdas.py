@@ -15,7 +15,10 @@ from lambdas.handlers import (
 @pytest.fixture
 def config() -> dict[str, Any]:
     return {
-        "s3": {"training_bucket": "training-bucket"},
+        "s3": {
+            "training_bucket": "training-bucket",
+            "raw_archive_bucket": "raw-archive-bucket",
+        },
         "brands": [
             {"id": "white-castle", "naming_pattern": "wc_*"},
             {"id": "brand-b", "naming_pattern": "bb_*"},
@@ -48,8 +51,8 @@ def test_s3_trigger_publishes_matched_brand_event(config: dict[str, Any]) -> Non
             "Records": [
                 {
                     "s3": {
-                        "bucket": {"name": "incoming-images"},
-                        "object": {"key": "raw/wc_burger%20image.jpg"},
+                        "bucket": {"name": "raw-archive-bucket"},
+                        "object": {"key": "white-castle/wc_burger%20image.jpg"},
                     }
                 }
             ]
@@ -63,8 +66,8 @@ def test_s3_trigger_publishes_matched_brand_event(config: dict[str, Any]) -> Non
     assert len(eventbridge.entries) == 1
     assert json.loads(eventbridge.entries[0]["Detail"]) == {
         "brand_id": "white-castle",
-        "bucket": "incoming-images",
-        "key": "raw/wc_burger image.jpg",
+        "bucket": "raw-archive-bucket",
+        "key": "white-castle/wc_burger image.jpg",
         "trigger": "s3",
     }
 
@@ -73,8 +76,8 @@ def test_s3_eventbridge_shape_ignores_unknown_brand(config: dict[str, Any]) -> N
     result = s3_trigger_handler(
         {
             "detail": {
-                "bucket": {"name": "incoming-images"},
-                "object": {"key": "raw/unknown_image.jpg"},
+                "bucket": {"name": "raw-archive-bucket"},
+                "object": {"key": "unknown-brand/unknown_image.jpg"},
             }
         },
         None,
@@ -87,6 +90,117 @@ def test_s3_eventbridge_shape_ignores_unknown_brand(config: dict[str, Any]) -> N
         "failed": 0,
         "message": "No configured brand matched the upload.",
     }
+
+
+def test_s3_trigger_rejects_untrusted_bucket(config: dict[str, Any]) -> None:
+    """A notification from a non-raw-archive bucket is dropped."""
+    eventbridge = EventBridgeMock()
+    result = s3_trigger_handler(
+        {
+            "Records": [
+                {
+                    "s3": {
+                        "bucket": {"name": "attacker-bucket"},
+                        "object": {"key": "white-castle/wc_x.jpg"},
+                    }
+                }
+            ]
+        },
+        None,
+        eventbridge_client=eventbridge,
+        config=config,
+    )
+    assert eventbridge.entries == []
+    assert result["accepted"] == 0
+    assert result.get("rejected") == 1
+
+
+def test_s3_trigger_rejects_cross_tenant_basename(config: dict[str, Any]) -> None:
+    """Prefix brand-b with basename wc_* is a cross-tenant trigger attempt.
+
+    The handler must NOT select white-castle (the naming-pattern match); the
+    event must be rejected and a CrossTenantTriggerAttempt metric emitted.
+    """
+
+    class CloudWatchMock:
+        def __init__(self) -> None:
+            self.metrics: list[dict[str, Any]] = []
+
+        def put_metric_data(self, **kwargs: Any) -> None:
+            self.metrics.append(kwargs)
+
+    cloudwatch = CloudWatchMock()
+    eventbridge = EventBridgeMock()
+    result = s3_trigger_handler(
+        {
+            "Records": [
+                {
+                    "s3": {
+                        "bucket": {"name": "raw-archive-bucket"},
+                        "object": {"key": "brand-b/wc_done_0.99.jpg"},
+                    }
+                }
+            ]
+        },
+        None,
+        eventbridge_client=eventbridge,
+        cloudwatch_client=cloudwatch,
+        config=config,
+    )
+    assert eventbridge.entries == []
+    assert result["accepted"] == 0
+    assert result.get("rejected") == 1
+    assert len(cloudwatch.metrics) == 1
+    metric = cloudwatch.metrics[0]["MetricData"][0]
+    assert metric["MetricName"] == "CrossTenantTriggerAttempt"
+
+
+def test_s3_trigger_eventbridge_shape_does_not_url_decode_key(
+    config: dict[str, Any],
+) -> None:
+    """EventBridge detail.object.key is NOT URL-encoded; do not unquote_plus it.
+
+    An object stored as literal 'brand-b/%77c_evil.jpg' must not decode into
+    basename 'wc_evil.jpg' and be attributed to white-castle.
+    """
+    eventbridge = EventBridgeMock()
+    result = s3_trigger_handler(
+        {
+            "detail": {
+                "bucket": {"name": "raw-archive-bucket"},
+                "object": {"key": "brand-b/%77c_evil.jpg"},
+            }
+        },
+        None,
+        eventbridge_client=eventbridge,
+        config=config,
+    )
+    assert eventbridge.entries == []
+    # Not a cross-tenant pattern match (basename literal '%77c_evil.jpg'
+    # matches neither wc_* nor bb_*); drop silently.
+    assert result["accepted"] == 0
+
+
+def test_s3_trigger_rejects_path_traversal_key(config: dict[str, Any]) -> None:
+    eventbridge = EventBridgeMock()
+    result = s3_trigger_handler(
+        {
+            "Records": [
+                {
+                    "s3": {
+                        "bucket": {"name": "raw-archive-bucket"},
+                        "object": {"key": "brand-b/../white-castle/wc_x.jpg"},
+                    }
+                }
+            ]
+        },
+        None,
+        eventbridge_client=eventbridge,
+        config=config,
+    )
+    assert eventbridge.entries == []
+    assert result["accepted"] == 0
+    assert result.get("rejected") == 1
 
 
 def test_eventbridge_trigger_starts_brand_pipeline(config: dict[str, Any]) -> None:
@@ -203,8 +317,8 @@ def test_s3_trigger_coalesces_uploads_per_brand(config: dict[str, Any]) -> None:
     records = [
         {
             "s3": {
-                "bucket": {"name": "incoming-images"},
-                "object": {"key": f"raw/wc_{i}.jpg"},
+                "bucket": {"name": "raw-archive-bucket"},
+                "object": {"key": f"white-castle/wc_{i}.jpg"},
             }
         }
         for i in range(25)
@@ -212,8 +326,8 @@ def test_s3_trigger_coalesces_uploads_per_brand(config: dict[str, Any]) -> None:
     records.extend(
         {
             "s3": {
-                "bucket": {"name": "incoming-images"},
-                "object": {"key": f"raw/bb_{i}.jpg"},
+                "bucket": {"name": "raw-archive-bucket"},
+                "object": {"key": f"brand-b/bb_{i}.jpg"},
             }
         }
         for i in range(3)
@@ -247,7 +361,10 @@ def test_s3_trigger_chunks_put_events_to_batches_of_ten(config: dict[str, Any]) 
             }
 
     many_brand_config = {
-        "s3": {"training_bucket": "training-bucket"},
+        "s3": {
+            "training_bucket": "training-bucket",
+            "raw_archive_bucket": "raw-archive-bucket",
+        },
         "brands": [
             {"id": f"brand-{i}", "naming_pattern": f"b{i}_*"} for i in range(15)
         ],
@@ -255,8 +372,8 @@ def test_s3_trigger_chunks_put_events_to_batches_of_ten(config: dict[str, Any]) 
     records = [
         {
             "s3": {
-                "bucket": {"name": "incoming-images"},
-                "object": {"key": f"raw/b{i}_file.jpg"},
+                "bucket": {"name": "raw-archive-bucket"},
+                "object": {"key": f"brand-{i}/b{i}_file.jpg"},
             }
         }
         for i in range(15)
