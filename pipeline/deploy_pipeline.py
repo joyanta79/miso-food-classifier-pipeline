@@ -57,22 +57,24 @@ from sagemaker.workflow.steps import ProcessingStep, TrainingStep
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STEPS_DIR = PROJECT_ROOT / "pipeline" / "steps"
 
-# Production safety floors. ``load_config`` already enforces structure via
-# ``pipeline.load_config``; this table enforces the *values*: a config is
-# considered "relaxed" (smoke-only) when any field here is weaker than its
-# production floor from config.yaml. ``op`` is the direction a value must
-# satisfy to be at-least-as-strict-as-production.
-#   "ge": production value is a minimum (config value must be >= floor)
-#   "le": production value is a maximum (config value must be <= floor)
-PRODUCTION_GATE_FLOORS: tuple[tuple[str, str, float, str], ...] = (
-    ("data_selection", "min_images_per_class", 500, "ge"),
-    ("data_selection", "target_dataset_min", 6000, "ge"),
-    ("cleanlab", "flag_threshold_fraction", 0.05, "le"),
-    ("evaluation", "accuracy_threshold", 0.97, "ge"),
-    ("evaluation", "fp_rate_emergency_threshold", 0.05, "le"),
-    ("evaluation", "latency_budget_ms", 1000, "le"),
-    ("drift", "level1_confidence_floor", 0.65, "ge"),
-)
+# ``PRODUCTION_GATE_FLOORS`` is defined once in :mod:`pipeline.pipeline` so the
+# SDK deploy path and the exported-definition value backstop
+# (:data:`pipeline.pipeline._GATE_RIGHT_VALUE_POLICY`) share a single source of
+# truth. It is loaded lazily to mirror this module's existing pattern (see
+# :func:`load_config`): keep the module importable even if the shared package
+# is not yet on ``sys.path``. ``pipeline.deploy_pipeline.PRODUCTION_GATE_FLOORS``
+# is re-exported via module-level ``__getattr__`` for any external callers.
+def _production_gate_floors() -> "tuple[tuple[str, str, float, str], ...]":
+    from pipeline.pipeline import PRODUCTION_GATE_FLOORS as _floors  # noqa: WPS433
+
+    return _floors
+
+
+def __getattr__(name: str) -> Any:  # PEP 562
+    if name == "PRODUCTION_GATE_FLOORS":
+        return _production_gate_floors()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 PRODUCTION_PIPELINE_PREFIX = "miso-food-classifier"
 SMOKE_PIPELINE_PREFIX = "smoke-miso-food-classifier"
@@ -95,7 +97,7 @@ def load_config(path: str) -> dict[str, Any]:
 def _relaxed_fields(config: dict[str, Any]) -> list[str]:
     """Return the list of fields whose values are weaker than the production floor."""
     weak: list[str] = []
-    for section, key, floor, op in PRODUCTION_GATE_FLOORS:
+    for section, key, floor, op in _production_gate_floors():
         section_cfg = config.get(section) or {}
         if key not in section_cfg:
             continue

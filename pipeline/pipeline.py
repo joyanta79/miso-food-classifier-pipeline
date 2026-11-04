@@ -1170,11 +1170,65 @@ def validate_dry_run_definition(
         raise ValueError("Registered models must remain PendingManualApproval")
 
 
+# Production safety floors -- the single source of truth consulted by every
+# config-value backstop in the repository. Each entry is
+# ``(section, key, floor, op)`` where ``op`` is the direction a config value
+# must satisfy to be at-least-as-strict-as-production:
+#   "ge": production value is a minimum (config value must be >= floor)
+#   "le": production value is a maximum (config value must be <= floor)
+# ``pipeline/deploy_pipeline.py`` imports this table so the SDK deploy path and
+# the exported-definition backstop cannot diverge.
+PRODUCTION_GATE_FLOORS: tuple[tuple[str, str, float, str], ...] = (
+    ("data_selection", "min_images_per_class", 500, "ge"),
+    ("data_selection", "target_dataset_min", 6000, "ge"),
+    ("cleanlab", "flag_threshold_fraction", 0.05, "le"),
+    ("evaluation", "accuracy_threshold", 0.97, "ge"),
+    ("evaluation", "fp_rate_emergency_threshold", 0.05, "le"),
+    ("evaluation", "latency_budget_ms", 1000, "le"),
+    ("drift", "level1_confidence_floor", 0.65, "ge"),
+)
+
+
+def _production_floor(section: str, key: str) -> float:
+    """Return the production floor for a ``(section, key)`` pair.
+
+    Resolving the policy table from :data:`PRODUCTION_GATE_FLOORS` guarantees a
+    single source of truth: tightening or loosening a production floor in one
+    place updates both the SDK ``--i-understand-this-is-a-smoke-config``
+    acknowledgement check and the exported-definition value backstop.
+    """
+    for floor_section, floor_key, value, _op in PRODUCTION_GATE_FLOORS:
+        if floor_section == section and floor_key == key:
+            return float(value)
+    raise KeyError(f"No PRODUCTION_GATE_FLOORS entry for {section!r}.{key!r}")
+
+
+# Known safety-critical Condition steps. ``_validate_gate_right_values`` refuses
+# to accept any numeric Condition inside one of these gates that is not covered
+# by ``_GATE_RIGHT_VALUE_POLICY`` below -- so a newly added or renamed gate
+# metric cannot silently escape value enforcement.
+_SAFETY_CRITICAL_GATES: frozenset[str] = frozenset(
+    {
+        "DatasetBoundsGate",
+        "CleanlabQualityGate",
+        "DriftGate",
+        "EvaluateModelQualityGate",
+    }
+)
+
+
 # Policy-approved ranges for the safety-critical gate RightValues. These are
 # inclusive bounds that any brand-overlay configuration must stay within. They are
 # the ultimate backstop against a definition-build-time overlay accidentally (or
 # maliciously) relaxing a safety gate even when the gate is now a literal rather
 # than an execution parameter.
+#
+# The dataset-volume lower bounds (``target_dataset_min`` /
+# ``min_images_per_class``) are sourced from :data:`PRODUCTION_GATE_FLOORS` so
+# the SDK deploy path and this exported-definition backstop cannot drift apart.
+# The evaluation sample-count floors are required to be strictly positive so
+# the "reject vacuous evaluation" conditions can never collapse to the tautology
+# ``metric >= 0``.
 _GATE_RIGHT_VALUE_POLICY: dict[tuple[str, str, str], tuple[float, float]] = {
     ("EvaluateModelQualityGate", "accuracy", "ConditionGreaterThanOrEqualTo"): (0.90, 1.0),
     (
@@ -1183,12 +1237,39 @@ _GATE_RIGHT_VALUE_POLICY: dict[tuple[str, str, str], tuple[float, float]] = {
         "ConditionLessThanOrEqualTo",
     ): (0.0, 0.10),
     ("EvaluateModelQualityGate", "latency_ms", "ConditionLessThanOrEqualTo"): (1.0, 5_000.0),
+    ("EvaluateModelQualityGate", "sample_count", "ConditionGreaterThanOrEqualTo"): (
+        1.0,
+        10_000_000.0,
+    ),
+    ("EvaluateModelQualityGate", "not_done_sample_count", "ConditionGreaterThanOrEqualTo"): (
+        1.0,
+        10_000_000.0,
+    ),
+    ("EvaluateModelQualityGate", "done_sample_count", "ConditionGreaterThanOrEqualTo"): (
+        1.0,
+        10_000_000.0,
+    ),
+    ("EvaluateModelQualityGate", "missing_images", "ConditionLessThanOrEqualTo"): (0.0, 0.0),
     ("DriftGate", "confidence", "ConditionGreaterThanOrEqualTo"): (0.50, 1.0),
     ("DriftGate", "correction_rate_multiplier", "ConditionLessThanOrEqualTo"): (1.0, 10.0),
     ("CleanlabQualityGate", "flagged_fraction", "ConditionLessThanOrEqualTo"): (0.0, 0.10),
-    ("DatasetBoundsGate", "dataset_size:min", "ConditionGreaterThanOrEqualTo"): (1.0, 1_000_000.0),
+    ("CleanlabQualityGate", "cleaned_count", "ConditionGreaterThanOrEqualTo"): (
+        _production_floor("data_selection", "target_dataset_min"),
+        10_000_000.0,
+    ),
+    ("CleanlabQualityGate", "minimum_class_count", "ConditionGreaterThanOrEqualTo"): (
+        _production_floor("data_selection", "min_images_per_class"),
+        100_000.0,
+    ),
+    ("DatasetBoundsGate", "dataset_size:min", "ConditionGreaterThanOrEqualTo"): (
+        _production_floor("data_selection", "target_dataset_min"),
+        10_000_000.0,
+    ),
     ("DatasetBoundsGate", "dataset_size:max", "ConditionLessThanOrEqualTo"): (1.0, 10_000_000.0),
-    ("DatasetBoundsGate", "minimum_class_count", "ConditionGreaterThanOrEqualTo"): (1.0, 100_000.0),
+    ("DatasetBoundsGate", "minimum_class_count", "ConditionGreaterThanOrEqualTo"): (
+        _production_floor("data_selection", "min_images_per_class"),
+        100_000.0,
+    ),
 }
 
 
@@ -1240,8 +1321,18 @@ def _validate_gate_right_values(definition: Mapping[str, Any]) -> None:
                     f"got {right_value!r}"
                 )
             if json_path is None:
-                # Unknown shape; still require a numeric literal (already checked) but
-                # skip range enforcement.
+                # Unknown shape. For non-safety-critical gates we still require a
+                # numeric literal (already checked) but skip range enforcement.
+                # Inside a safety-critical gate we must refuse: an unrecognised
+                # LeftValue could be a renamed metric that would otherwise
+                # escape policy lookup entirely.
+                if step_name in _SAFETY_CRITICAL_GATES:
+                    raise ValueError(
+                        f"Gate {step_name!r} has a Condition with an "
+                        "unrecognised LeftValue shape; safety-critical gates "
+                        "must only use Std:JsonGet LeftValues so each metric "
+                        "can be matched against _GATE_RIGHT_VALUE_POLICY."
+                    )
                 continue
             lookup_path = json_path
             if step_name == "DatasetBoundsGate" and json_path == "dataset_size":
@@ -1251,8 +1342,18 @@ def _validate_gate_right_values(definition: Mapping[str, Any]) -> None:
             key = (step_name, lookup_path, condition_type)
             policy = _GATE_RIGHT_VALUE_POLICY.get(key)
             if policy is None:
-                # No policy declared for this gate/path/comparator -- leave the literal
+                # Fail closed inside a known safety gate: a newly added or
+                # renamed metric here must not silently escape value
+                # enforcement. Outside the known safety set we leave the literal
                 # check in place but do not range-enforce.
+                if step_name in _SAFETY_CRITICAL_GATES:
+                    raise ValueError(
+                        f"Gate {step_name!r} Condition on {json_path!r} "
+                        f"({condition_type}) has no declared policy in "
+                        "_GATE_RIGHT_VALUE_POLICY. Every Condition inside a "
+                        "safety-critical gate must have a policy-approved "
+                        "range so a config overlay cannot neutralise it."
+                    )
                 continue
             low, high = policy
             if not (low <= float(right_value) <= high):
