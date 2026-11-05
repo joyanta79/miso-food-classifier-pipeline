@@ -126,14 +126,29 @@ class DataSyncTask:
 
     @staticmethod
     def _checksum(head: dict[str, Any]) -> tuple[str, str]:
-        """Use SHA-256 when available; otherwise compare normalized ETags."""
+        """Return the strong, content-bound S3 checksum for an object.
+
+        The migration integrity gate requires SHA-256. S3 only returns
+        ``ChecksumSHA256`` on ``HeadObject`` when the request is made with
+        ``ChecksumMode="ENABLED"`` *and* the object was uploaded with an
+        additional SHA-256 checksum (e.g. ``--checksum-algorithm SHA256``).
+        Any other case -- including the historical ETag fallback -- is
+        rejected: ETag is MD5 (not collision resistant) for single-part
+        SSE-S3 objects, a function of the part layout rather than content
+        for multipart objects, and not a plaintext digest at all for
+        SSE-KMS/SSE-C objects. Degrading to it silently would turn the
+        post-transfer attestation into a weak-hash check, so we fail closed
+        instead and force the operator to re-upload with SHA-256.
+        """
         checksum = head.get("ChecksumSHA256")
         if checksum:
-            return "SHA256", checksum
-        etag = head.get("ETag")
-        if not etag:
-            raise ValueError("Object metadata lacks ChecksumSHA256 and ETag")
-        return "ETag", str(etag).strip('"')
+            return "SHA256", str(checksum)
+        raise ValueError(
+            "Object metadata lacks ChecksumSHA256; re-upload the object with "
+            "--checksum-algorithm SHA256 (or request HeadObject with "
+            "ChecksumMode=ENABLED on a SHA-256-checksummed object) before "
+            "running the migration integrity gate."
+        )
 
     @staticmethod
     def _head_destination(
@@ -147,7 +162,9 @@ class DataSyncTask:
         ``ClientError``/404 escape unhandled.
         """
         try:
-            return destination_s3_client.head_object(Bucket=bucket, Key=key)
+            return destination_s3_client.head_object(
+                Bucket=bucket, Key=key, ChecksumMode="ENABLED"
+            )
         except Exception as exc:  # pragma: no cover - exercised at integration
             # Detect the common boto3 404 shape without a hard dependency on
             # botocore being importable at module load time.
@@ -180,7 +197,9 @@ class DataSyncTask:
         for item in objects:
             source_key = item["source_key"]
             destination_key = item.get("destination_key", source_key)
-            source_head = source_s3_client.head_object(Bucket=item["source_bucket"], Key=source_key)
+            source_head = source_s3_client.head_object(
+                Bucket=item["source_bucket"], Key=source_key, ChecksumMode="ENABLED"
+            )
             destination_head = self._head_destination(
                 destination_s3_client, item["destination_bucket"], destination_key
             )

@@ -78,9 +78,14 @@ class S3HeadMock:
         self.head = head
         self.requests: list[dict[str, str]] = []
 
-    def head_object(self, *, Bucket: str, Key: str) -> dict[str, str]:
-        self.requests.append({"Bucket": Bucket, "Key": Key})
-        return self.head
+    def head_object(self, **kwargs: Any) -> dict[str, str]:
+        self.requests.append(dict(kwargs))
+        # Model the real S3 contract: ``ChecksumSHA256`` is only returned
+        # on ``HeadObject`` when the caller passes ``ChecksumMode=ENABLED``.
+        response = dict(self.head)
+        if kwargs.get("ChecksumMode") != "ENABLED":
+            response.pop("ChecksumSHA256", None)
+        return response
 
 
 def test_drift_levels_include_mock_correction_database_metric(config: dict[str, Any]) -> None:
@@ -156,6 +161,36 @@ def test_datasync_uses_s3_standard_and_validates_sha256() -> None:
     assert datasync.task_request is not None
     assert datasync.task_request["Options"]["VerifyMode"] == "ONLY_FILES_TRANSFERRED"
     assert result["checksums"][0].matched is True
+    assert result["checksums"][0].algorithm == "SHA256"
+    # Both HEAD calls must request SHA-256 via ChecksumMode=ENABLED,
+    # otherwise S3 would never populate ``ChecksumSHA256`` and the gate
+    # would silently degrade to an MD5 ETag comparison.
+    assert source.requests[0].get("ChecksumMode") == "ENABLED"
+    assert destination.requests[0].get("ChecksumMode") == "ENABLED"
+
+
+def test_datasync_rejects_missing_sha256_checksum() -> None:
+    task = DataSyncTask(
+        task_name="archive-migration",
+        source_bucket_arn="arn:aws:s3:::source",
+        destination_bucket_arn="arn:aws:s3:::destination",
+        bucket_access_role_arn="arn:aws:iam::123:role/DataSync",
+    )
+    # Objects with only an ETag (no stored SHA-256) must fail closed: the
+    # ETag is MD5-based and is not an acceptable content-bound digest for
+    # the post-transfer integrity gate.
+    with pytest.raises(ValueError, match="ChecksumSHA256"):
+        task.validate_checksums(
+            S3HeadMock({"ETag": '"source"'}),
+            S3HeadMock({"ETag": '"destination"'}),
+            [
+                {
+                    "source_bucket": "source",
+                    "destination_bucket": "destination",
+                    "source_key": "raw/image.jpg",
+                }
+            ],
+        )
 
 
 def test_datasync_rejects_checksum_mismatch() -> None:
@@ -167,8 +202,8 @@ def test_datasync_rejects_checksum_mismatch() -> None:
     )
     with pytest.raises(ValueError, match="Checksum mismatch"):
         task.validate_checksums(
-            S3HeadMock({"ETag": '"source"'}),
-            S3HeadMock({"ETag": '"destination"'}),
+            S3HeadMock({"ChecksumSHA256": "source-sha256"}),
+            S3HeadMock({"ChecksumSHA256": "destination-sha256"}),
             [
                 {
                     "source_bucket": "source",
