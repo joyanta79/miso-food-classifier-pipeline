@@ -662,7 +662,17 @@ def build_dry_run_definition(
             {
                 "InputName": "model-artifacts",
                 "S3Input": {
-                    "S3Uri": _s3_uri(model_artifacts_bucket, brand.id),
+                    # Narrow the EvaluateModel model channel from the whole brand
+                    # prefix (s3://<model-artifacts>/<brand>/, which includes
+                    # checkpoints/ and any object a principal with s3:PutObject
+                    # on the prefix uploaded) to the exact artifact emitted by
+                    # this execution's TrainBrandClassifier step. Combined with
+                    # the single-path, Keras-v3-only ``_load_model`` in
+                    # evaluation.py this prevents an attacker-writable sibling
+                    # object from being selected and deserialized (CWE-502).
+                    "S3Uri": {
+                        "Get": "Steps.TrainBrandClassifier.ModelArtifacts.S3ModelArtifacts"
+                    },
                     "LocalPath": "/opt/ml/processing/input/model",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
