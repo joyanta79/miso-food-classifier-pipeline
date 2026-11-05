@@ -42,6 +42,11 @@ _DEFAULT_IDEMPOTENCY_WINDOW_SECONDS = 300
 # therefore suppress a new start for the same brand.
 _IN_FLIGHT_PIPELINE_STATES = frozenset({"Executing", "Stopping"})
 
+# Hard cap on pages walked by the best-effort in-flight check. 100 results per
+# page x 20 pages = 2000 recent executions, which comfortably exceeds the
+# first-page truncation case the original guard failed under.
+_LIST_EXECUTIONS_MAX_PAGES = 20
+
 
 def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
     """Load the shared project configuration without mutating it."""
@@ -203,10 +208,10 @@ def _pipeline_execution_display_name(
 ) -> str:
     """Deterministic display name scoped to brand + current throttle window.
 
-    SageMaker enforces that ``PipelineExecutionDisplayName`` is unique per
-    pipeline, so two starts for the same brand that fall inside the same
-    window collide and the second call fails fast (idempotent retry) instead
-    of booting a second GPU training job.
+    Paired with the matching ``ClientRequestToken`` from
+    ``_pipeline_execution_client_token``: SageMaker rejects a second
+    ``StartPipelineExecution`` with the same token inside the window, which
+    is the actual atomic serialisation (the display name is informational).
     """
     window = _idempotency_window_seconds()
     bucket = int((now if now is not None else time.time()) // window)
@@ -217,33 +222,83 @@ def _pipeline_execution_display_name(
     return f"brand-{safe_brand}-{bucket}-{digest}"
 
 
-def _has_in_flight_execution(sagemaker: Any, pipeline_name: str, brand_id: str) -> bool:
-    """Return True if a pipeline execution for ``brand_id`` is already running.
+def _pipeline_execution_client_token(
+    brand_id: str, pipeline_name: str, now: float | None = None
+) -> str:
+    """Deterministic ClientRequestToken for the current throttle window.
 
-    Falls back to ``False`` -- letting ``start_pipeline_execution`` be the sole
-    gate -- when the injected client does not implement
-    ``list_pipeline_executions`` (e.g. the lightweight test doubles used in
-    unit tests and local mode).
+    SageMaker's ``StartPipelineExecution`` is idempotent per
+    ``ClientRequestToken`` (per pipeline): a second call with the same token
+    returns the first execution's ARN instead of starting a new run. Keying
+    the token on ``(pipeline_name, brand_id, window_bucket)`` makes the start
+    atomic -- concurrent Lambda invocations from one upload burst collapse
+    into a single execution regardless of the TOCTOU race in the preceding
+    List check.
+
+    The returned token matches ``^[A-Za-z0-9-]{1,128}$`` (SageMaker's accepted
+    character set and length limit).
     """
+    window = _idempotency_window_seconds()
+    bucket = int((now if now is not None else time.time()) // window)
+    digest = hashlib.sha256(
+        f"{pipeline_name}:{brand_id}:{bucket}".encode()
+    ).hexdigest()[:40]
+    return f"miso-{bucket}-{digest}"
+
+
+def _has_in_flight_execution(sagemaker: Any, pipeline_name: str, brand_id: str) -> bool:
+    """Return True if a pipeline execution for ``pipeline_name`` is already running.
+
+    This is a best-effort optimisation only: the atomic reservation is the
+    deterministic ``ClientRequestToken`` passed to ``start_pipeline_execution``
+    (SageMaker rejects a second start with the same token inside the per-brand
+    throttle window). ``PipelineName`` already scopes the listing to a single
+    brand's pipeline, so no additional display-name filtering is applied --
+    the previous substring match silently discarded executions started by
+    other code paths or by this handler before display names were pinned.
+
+    All pages are inspected via ``NextToken`` so a brand with many recent
+    executions cannot push an in-flight one off the first page.
+
+    Falls back to ``False`` -- letting the ``ClientRequestToken`` on
+    ``start_pipeline_execution`` be the sole gate -- when the injected client
+    does not implement ``list_pipeline_executions`` (e.g. the lightweight
+    test doubles used in unit tests and local mode).
+    """
+    del brand_id  # Pipeline name already scopes the query to one brand.
     list_fn = getattr(sagemaker, "list_pipeline_executions", None)
     if list_fn is None:
         return False
-    try:
-        response = list_fn(
-            PipelineName=pipeline_name,
-            SortBy="CreationTime",
-            SortOrder="Descending",
-        )
-    except Exception:
-        # Fail closed on the in-flight check so a throttled or permission-
-        # denied List call cannot escalate into unbounded Starts.
-        return True
-    for summary in response.get("PipelineExecutionSummaries", []) or []:
-        if summary.get("PipelineExecutionStatus") not in _IN_FLIGHT_PIPELINE_STATES:
-            continue
-        display_name = summary.get("PipelineExecutionDisplayName", "")
-        if display_name.startswith(f"brand-{brand_id}-") or f"-{brand_id}-" in display_name:
+    next_token: str | None = None
+    for _ in range(_LIST_EXECUTIONS_MAX_PAGES):
+        kwargs: dict[str, Any] = {
+            "PipelineName": pipeline_name,
+            "SortBy": "CreationTime",
+            "SortOrder": "Descending",
+            "MaxResults": 100,
+        }
+        if next_token:
+            kwargs["NextToken"] = next_token
+        try:
+            response = list_fn(**kwargs)
+        except TypeError:
+            # Older/stub clients that do not accept MaxResults/NextToken.
+            response = list_fn(
+                PipelineName=pipeline_name,
+                SortBy="CreationTime",
+                SortOrder="Descending",
+            )
+            next_token = None
+        except Exception:
+            # Fail closed on the in-flight check so a throttled or permission-
+            # denied List call cannot escalate into unbounded Starts.
             return True
+        for summary in response.get("PipelineExecutionSummaries", []) or []:
+            if summary.get("PipelineExecutionStatus") in _IN_FLIGHT_PIPELINE_STATES:
+                return True
+        next_token = response.get("NextToken")
+        if not next_token:
+            return False
     return False
 
 
@@ -287,19 +342,21 @@ def eventbridge_trigger_handler(
         }
 
     display_name = _pipeline_execution_display_name(brand_id, pipeline_name)
-    try:
-        response = sagemaker.start_pipeline_execution(
-            PipelineName=pipeline_name,
-            PipelineParameters=_pipeline_parameters(brand_id, trigger, resolved_config),
-            PipelineExecutionDisplayName=display_name,
-        )
-    except TypeError:
-        # Test doubles / older clients that do not accept the idempotency
-        # kwarg still work; the display name is then best-effort only.
-        response = sagemaker.start_pipeline_execution(
-            PipelineName=pipeline_name,
-            PipelineParameters=_pipeline_parameters(brand_id, trigger, resolved_config),
-        )
+    client_token = _pipeline_execution_client_token(brand_id, pipeline_name)
+    # NOTE: ``ClientRequestToken`` is the atomic reservation -- SageMaker
+    # serialises concurrent starts for the same (pipeline, token) tuple, which
+    # is what the TOCTOU race in the preceding List check cannot do on its
+    # own. The display name is kept for observability and must not be used as
+    # a correctness guarantee. The ``except TypeError`` fallback that
+    # previously dropped these kwargs has been removed because an execution
+    # started without them silently escapes every subsequent in-flight check
+    # and defeats the idempotency guarantee this handler advertises.
+    response = sagemaker.start_pipeline_execution(
+        PipelineName=pipeline_name,
+        PipelineParameters=_pipeline_parameters(brand_id, trigger, resolved_config),
+        PipelineExecutionDisplayName=display_name,
+        ClientRequestToken=client_token,
+    )
     return {
         "brand_id": brand_id,
         "pipeline_execution_arn": response["PipelineExecutionArn"],
