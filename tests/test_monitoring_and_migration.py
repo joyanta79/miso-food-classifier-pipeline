@@ -116,17 +116,41 @@ def test_model_monitor_schedule_signal_and_alarm_specs(config: dict[str, Any]) -
 
     assert job["ModelQualityAppSpecification"]["ProblemType"] == "MulticlassClassification"
     assert schedule["MonitoringScheduleConfig"]["MonitoringType"] == "ModelQuality"
-    assert [alarm["Threshold"] for alarm in cloudwatch.alarms] == [1.0, 2.0, 3.0]
-    assert [alarm["AlarmActions"] for alarm in cloudwatch.alarms] == [
+    assert [alarm["Threshold"] for alarm in cloudwatch.alarms[:3]] == [1.0, 2.0, 3.0]
+    assert [alarm["AlarmActions"] for alarm in cloudwatch.alarms[:3]] == [
         ["arn:aws:sns:local:review"],
         ["arn:aws:sns:local:ml-lead"],
         ["arn:aws:sns:local:vp"],
     ]
+    # Escalation alarms must treat missing data as breaching so a stopped
+    # publisher does not look permanently healthy, and must cover the hourly
+    # publication cadence rather than a single 300s window.
+    for alarm in cloudwatch.alarms[:3]:
+        assert alarm["TreatMissingData"] == "breaching"
+        assert alarm["Period"] == 3600
+        assert alarm["EvaluationPeriods"] >= 1
+        assert alarm["InsufficientDataActions"] == alarm["AlarmActions"]
+    # A heartbeat alarm on MonitorRuns and a SageMaker job-failure alarm must
+    # also be configured so loss of the drift signal is detectable.
+    alarm_metric_names = {alarm["MetricName"] for alarm in cloudwatch.alarms}
+    assert {"DriftLevel", "MonitorRuns", "ProcessingJobsFailed"} <= alarm_metric_names
+    heartbeat = next(a for a in cloudwatch.alarms if a["MetricName"] == "MonitorRuns")
+    assert heartbeat["TreatMissingData"] == "breaching"
+    assert heartbeat["ComparisonOperator"] == "LessThanThreshold"
     assert response["schedule"]["MonitoringScheduleArn"] == "arn:schedule/food-schedule"
 
     assessment = monitor.assess_drift(0.64, 0.1, 0.1)
     monitor.publish_drift_signal(cloudwatch, "food-classifier", assessment)
+    assert cloudwatch.metrics[0]["MetricData"][0]["MetricName"] == "DriftLevel"
     assert cloudwatch.metrics[0]["MetricData"][0]["Value"] == 2
+    # A heartbeat MonitorRuns=1 datapoint is published alongside the drift
+    # level so a heartbeat-missing alarm can detect publisher loss.
+    heartbeat_point = next(
+        point
+        for point in cloudwatch.metrics[0]["MetricData"]
+        if point["MetricName"] == "MonitorRuns"
+    )
+    assert heartbeat_point["Value"] == 1
 
 
 def test_datasync_uses_s3_standard_and_validates_sha256() -> None:

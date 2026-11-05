@@ -142,15 +142,35 @@ class ModelMonitorSetup:
             },
         }
 
+    # Alarm period matched to the hourly ModelQuality schedule so a single
+    # stale 5-minute slice cannot clear an escalation.  EvaluationPeriods=2
+    # with DatapointsToAlarm=1 keeps the alarm latched across one missing or
+    # late publish without waiting hours before the first fire.
+    _ESCALATION_ALARM_PERIOD_SECONDS = 3600
+    _ESCALATION_ALARM_EVALUATION_PERIODS = 2
+    _ESCALATION_ALARM_DATAPOINTS_TO_ALARM = 1
+
     def drift_alarm_specs(self, endpoint_name: str) -> list[dict[str, Any]]:
-        """Build CloudWatch alarms for L1 review, L2 ML lead, and L3 escalation."""
+        """Build CloudWatch alarms for L1 review, L2 ML lead, and L3 escalation.
+
+        The returned list contains, in order: the three level-based drift
+        alarms (thresholds 1/2/3), a heartbeat alarm that fires when the
+        ``MonitorRuns`` metric stops being published (publisher crash, revoked
+        ``cloudwatch:PutMetricData``, deleted/suspended monitoring schedule),
+        and an alarm on SageMaker Model Monitor processing-job failures.
+
+        All alarms set ``TreatMissingData`` to ``breaching`` so an absent
+        signal is treated as unhealthy rather than silently healthy, and
+        ``InsufficientDataActions`` mirrors ``AlarmActions`` to guarantee an
+        SNS notification on the very first unknown evaluation.
+        """
         notifications = self.config["notifications"]
         topics = {
             1: notifications["review_topic_arn"],
             2: notifications["ml_lead_topic_arn"],
             3: notifications["vp_engineering_topic_arn"],
         }
-        return [
+        level_alarms: list[dict[str, Any]] = [
             {
                 "AlarmName": f"miso-{endpoint_name}-model-drift-level-{level}",
                 "AlarmDescription": f"Miso model drift reached level {level}",
@@ -158,15 +178,65 @@ class ModelMonitorSetup:
                 "MetricName": "DriftLevel",
                 "Dimensions": [{"Name": "EndpointName", "Value": endpoint_name}],
                 "Statistic": "Maximum",
-                "Period": 300,
-                "EvaluationPeriods": 1,
+                "Period": self._ESCALATION_ALARM_PERIOD_SECONDS,
+                "EvaluationPeriods": self._ESCALATION_ALARM_EVALUATION_PERIODS,
+                "DatapointsToAlarm": self._ESCALATION_ALARM_DATAPOINTS_TO_ALARM,
                 "Threshold": float(level),
                 "ComparisonOperator": "GreaterThanOrEqualToThreshold",
-                "TreatMissingData": "notBreaching",
+                "TreatMissingData": "breaching",
+                "ActionsEnabled": True,
                 "AlarmActions": [topics[level]],
+                "OKActions": [topics[level]],
+                "InsufficientDataActions": [topics[level]],
             }
             for level in (1, 2, 3)
         ]
+        heartbeat_alarm: dict[str, Any] = {
+            "AlarmName": f"miso-{endpoint_name}-model-drift-heartbeat-missing",
+            "AlarmDescription": (
+                "Miso drift publisher stopped emitting MonitorRuns heartbeat; "
+                "a missing DriftLevel signal is now indistinguishable from 'no drift'."
+            ),
+            "Namespace": self.namespace,
+            "MetricName": "MonitorRuns",
+            "Dimensions": [{"Name": "EndpointName", "Value": endpoint_name}],
+            "Statistic": "Sum",
+            "Period": self._ESCALATION_ALARM_PERIOD_SECONDS,
+            "EvaluationPeriods": self._ESCALATION_ALARM_EVALUATION_PERIODS,
+            "DatapointsToAlarm": self._ESCALATION_ALARM_DATAPOINTS_TO_ALARM,
+            "Threshold": 1.0,
+            "ComparisonOperator": "LessThanThreshold",
+            "TreatMissingData": "breaching",
+            "ActionsEnabled": True,
+            # A silent monitor is as serious as an urgent drift escalation.
+            "AlarmActions": [topics[3]],
+            "OKActions": [topics[3]],
+            "InsufficientDataActions": [topics[3]],
+        }
+        job_failure_alarm: dict[str, Any] = {
+            "AlarmName": f"miso-{endpoint_name}-model-monitor-job-failures",
+            "AlarmDescription": (
+                "SageMaker Model Monitor processing jobs are failing; "
+                "drift evaluations are not being produced."
+            ),
+            "Namespace": "/aws/sagemaker/ModelMonitoring",
+            "MetricName": "ProcessingJobsFailed",
+            "Dimensions": [{"Name": "EndpointName", "Value": endpoint_name}],
+            "Statistic": "Sum",
+            "Period": self._ESCALATION_ALARM_PERIOD_SECONDS,
+            "EvaluationPeriods": self._ESCALATION_ALARM_EVALUATION_PERIODS,
+            "DatapointsToAlarm": self._ESCALATION_ALARM_DATAPOINTS_TO_ALARM,
+            "Threshold": 1.0,
+            "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+            # Monitor-job-failure counters only publish on failures, so an
+            # absent datapoint is the healthy case here.
+            "TreatMissingData": "notBreaching",
+            "ActionsEnabled": True,
+            "AlarmActions": [topics[2]],
+            "OKActions": [topics[2]],
+            "InsufficientDataActions": [topics[2]],
+        }
+        return level_alarms + [heartbeat_alarm, job_failure_alarm]
 
     def publish_drift_signal(
         self,
@@ -174,8 +244,15 @@ class ModelMonitorSetup:
         endpoint_name: str,
         assessment: DriftAssessment,
     ) -> dict[str, Any]:
-        """Publish a CloudWatch drift-level measurement through an injected client."""
-        return cloudwatch_client.put_metric_data(
+        """Publish a CloudWatch drift-level measurement through an injected client.
+
+        A companion ``MonitorRuns`` heartbeat metric is emitted in the same
+        request so a heartbeat-missing alarm can detect publisher loss.  The
+        ``put_metric_data`` response is inspected: a non-2xx HTTP status is
+        raised as :class:`RuntimeError` so a silently failing publish still
+        produces a local signal rather than looking like 'no drift'.
+        """
+        response = cloudwatch_client.put_metric_data(
             Namespace=self.namespace,
             MetricData=[
                 {
@@ -183,9 +260,38 @@ class ModelMonitorSetup:
                     "Value": assessment.level,
                     "Unit": "Count",
                     "Dimensions": [{"Name": "EndpointName", "Value": endpoint_name}],
-                }
+                },
+                {
+                    "MetricName": "MonitorRuns",
+                    "Value": 1,
+                    "Unit": "Count",
+                    "Dimensions": [{"Name": "EndpointName", "Value": endpoint_name}],
+                },
             ],
         )
+        self._raise_for_cloudwatch_response(response, operation="put_metric_data")
+        return response
+
+    @staticmethod
+    def _raise_for_cloudwatch_response(response: Any, *, operation: str) -> None:
+        """Raise ``RuntimeError`` when a CloudWatch response signals failure.
+
+        Accepts any mapping-like response (botocore returns a ``dict`` with
+        ``ResponseMetadata``).  Clients that do not include response metadata
+        (e.g. the local-mode mock) are treated as successful.
+        """
+        if not isinstance(response, dict):
+            return
+        metadata = response.get("ResponseMetadata")
+        if not isinstance(metadata, dict):
+            return
+        status = metadata.get("HTTPStatusCode")
+        if status is None:
+            return
+        if not (200 <= int(status) < 300):
+            raise RuntimeError(
+                f"CloudWatch {operation} returned HTTP status {status}"
+            )
 
     def apply(
         self,
