@@ -58,20 +58,33 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STEPS_DIR = PROJECT_ROOT / "pipeline" / "steps"
 
 # Production safety floors. ``load_config`` already enforces structure via
-# ``pipeline.load_config``; this table enforces the *values*: a config is
-# considered "relaxed" (smoke-only) when any field here is weaker than its
-# production floor from config.yaml. ``op`` is the direction a value must
-# satisfy to be at-least-as-strict-as-production.
+# ``pipeline.load_config``; this table enforces the *values* for every config
+# key that ``build()`` wires straight into a safety-gate ``Condition.RightValue``.
+# A config is considered "relaxed" (smoke-only) when any field here is weaker
+# than its production floor from config.yaml. ``op`` is the direction a value
+# must satisfy to be at-least-as-strict-as-production.
 #   "ge": production value is a minimum (config value must be >= floor)
 #   "le": production value is a maximum (config value must be <= floor)
+#
+# This is the single source of truth consumed by ``_relaxed_fields``: every
+# config key that becomes a gate RightValue in ``build()`` must have an entry
+# here. If a key is ever added to a gate without a floor entry, the authoritative
+# ``_validate_gate_right_values`` check (invoked below after ``build()``) is the
+# backstop; however keeping both aligned is required so the relaxed-config
+# detector cannot be bypassed by weakening only knobs that are absent from the
+# table.
 PRODUCTION_GATE_FLOORS: tuple[tuple[str, str, float, str], ...] = (
     ("data_selection", "min_images_per_class", 500, "ge"),
     ("data_selection", "target_dataset_min", 6000, "ge"),
+    ("data_selection", "target_dataset_max", 50000, "le"),
     ("cleanlab", "flag_threshold_fraction", 0.05, "le"),
     ("evaluation", "accuracy_threshold", 0.97, "ge"),
     ("evaluation", "fp_rate_emergency_threshold", 0.05, "le"),
     ("evaluation", "latency_budget_ms", 1000, "le"),
+    ("evaluation", "min_sample_count", 100, "ge"),
+    ("evaluation", "min_per_class_count", 50, "ge"),
     ("drift", "level1_confidence_floor", 0.65, "ge"),
+    ("drift", "correction_rate_multiplier", 3, "le"),
 )
 
 PRODUCTION_PIPELINE_PREFIX = "miso-food-classifier"
@@ -93,21 +106,51 @@ def load_config(path: str) -> dict[str, Any]:
 
 
 def _relaxed_fields(config: dict[str, Any]) -> list[str]:
-    """Return the list of fields whose values are weaker than the production floor."""
+    """Return fields whose values are weaker than the production floor.
+
+    Every key in :data:`PRODUCTION_GATE_FLOORS` is wired directly into a
+    safety-gate ``Condition.RightValue`` by :func:`build`. A missing or
+    non-numeric value is therefore a hard error rather than a silent
+    ``continue``: previously those branches let a config evade the detector by
+    deleting a tabled key or setting it to a non-numeric value, so the
+    production-name collision refusal and the ``--i-understand-this-is-a-
+    smoke-config`` acknowledgement were both skipped.
+    """
     weak: list[str] = []
+    missing: list[str] = []
+    non_numeric: list[str] = []
     for section, key, floor, op in PRODUCTION_GATE_FLOORS:
         section_cfg = config.get(section) or {}
         if key not in section_cfg:
+            missing.append(f"{section}.{key}")
             continue
         value = section_cfg[key]
         try:
             numeric = float(value)
         except (TypeError, ValueError):
+            non_numeric.append(f"{section}.{key}={value!r}")
             continue
         if op == "ge" and numeric < float(floor):
             weak.append(f"{section}.{key}={value} < production floor {floor}")
         elif op == "le" and numeric > float(floor):
             weak.append(f"{section}.{key}={value} > production floor {floor}")
+    if missing or non_numeric:
+        problems: list[str] = []
+        if missing:
+            problems.append(
+                "missing required gate value(s): " + ", ".join(sorted(missing))
+            )
+        if non_numeric:
+            problems.append(
+                "non-numeric gate value(s): " + ", ".join(sorted(non_numeric))
+            )
+        raise ValueError(
+            "config cannot be used to build the pipeline: "
+            + "; ".join(problems)
+            + ". Every key consumed as a gate RightValue must be present and "
+            "numeric so the relaxed-config detector cannot be bypassed by "
+            "omitting or stringifying it."
+        )
     return weak
 
 
@@ -630,7 +673,10 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
-    weak_fields = _relaxed_fields(config)
+    try:
+        weak_fields = _relaxed_fields(config)
+    except ValueError as error:
+        parser.error(str(error))
     is_relaxed = bool(weak_fields)
 
     if is_relaxed and not args.acknowledge_smoke:
@@ -644,11 +690,13 @@ def main() -> None:
 
     pipeline_name = args.pipeline_name or _default_pipeline_name(config, is_relaxed)
 
-    # Belt-and-braces: never let a relaxed/smoke run upsert over a pipeline
-    # name that collides with the production prefix. If the operator passed an
-    # explicit --pipeline-name that still looks like the production name, we
-    # refuse rather than overwrite the Terraform-managed definition.
-    if is_relaxed and args.upsert:
+    # Belt-and-braces: never let --upsert overwrite the Terraform-managed
+    # production pipeline name from the deploy CLI. The refusal fires
+    # unconditionally (not only when ``is_relaxed`` is True) because the
+    # relaxed-config detector is a partial, defence-in-depth check; the
+    # production name is owned by Terraform (infra/main.tf), and deploy
+    # CLI runs must use the smoke prefix or an operator-supplied name.
+    if args.upsert:
         brand_id = config["brands"][0]["id"]
         production_name = f"{PRODUCTION_PIPELINE_PREFIX}-{brand_id}"
         collides = pipeline_name == production_name or (
@@ -657,15 +705,43 @@ def main() -> None:
         )
         if collides:
             parser.error(
-                f"refusing to --upsert a relaxed/smoke config onto pipeline "
-                f"name {pipeline_name!r}: it collides with the production "
-                f"pipeline name prefix {PRODUCTION_PIPELINE_PREFIX!r}. "
-                "Pass --pipeline-name with a distinct name (e.g. prefixed "
+                f"refusing to --upsert pipeline name {pipeline_name!r}: it "
+                f"collides with the Terraform-managed production pipeline "
+                f"name prefix {PRODUCTION_PIPELINE_PREFIX!r}. Pass "
+                "--pipeline-name with a distinct name (e.g. prefixed "
                 f"{SMOKE_PIPELINE_PREFIX!r})."
             )
 
     pipeline = build(config, args.code_prefix, args.images_uri, pipeline_name=pipeline_name)
     role = config["aws"]["sagemaker_role_arn"]
+
+    # Authoritative, SDK-source validators (same checks run by the
+    # dry-run / export paths). They enforce the ``_GATE_RIGHT_VALUE_POLICY``
+    # ranges on every Condition RightValue -- including knobs the deploy
+    # CLI used to not have a floor for -- so a build that passed the
+    # relaxed-config detector still cannot upsert gate values outside the
+    # policy-approved ranges.
+    import json as _json  # noqa: WPS433 (local import keeps module-import cheap)
+
+    from pipeline.pipeline import (  # noqa: WPS433 (lazy, see load_config)
+        _validate_gate_right_values,
+        validate_sdk_pipeline_definition,
+    )
+
+    sdk_definition = pipeline.definition()
+    try:
+        validate_sdk_pipeline_definition(sdk_definition)
+        parsed_definition = (
+            _json.loads(sdk_definition)
+            if isinstance(sdk_definition, str)
+            else dict(sdk_definition)
+        )
+        _validate_gate_right_values(parsed_definition)
+    except ValueError as error:
+        parser.error(
+            "built pipeline definition failed safety validation and will "
+            f"NOT be upserted: {error}"
+        )
 
     if args.upsert:
         pipeline.upsert(role_arn=role)
