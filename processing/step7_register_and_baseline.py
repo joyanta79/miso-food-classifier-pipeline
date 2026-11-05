@@ -37,18 +37,36 @@ def load_evaluation_report(path: str | Path) -> dict[str, Any]:
 
 
 def build_baseline_statistics(evaluation: dict[str, Any], brand_id: str) -> dict[str, Any]:
-    """Make an immutable, model-scoped baseline for downstream monitoring."""
+    """Make an immutable, model-scoped baseline for downstream monitoring.
+
+    Reads the canonical EvaluateModelQualityGate metric names
+    (``emergency_false_positive_rate``, ``accuracy``, ``sample_count``,
+    ``not_done_sample_count``, ``done_sample_count``, ``missing_images``,
+    ``latency_ms``). The legacy key ``done_when_not_done_fp_rate`` is still
+    accepted so historical evaluation.json files remain readable, but new
+    reports from both evaluation implementations publish the canonical names.
+    """
     metrics = evaluation["metrics"]
+    fp_rate = metrics.get(
+        "emergency_false_positive_rate", metrics.get("done_when_not_done_fp_rate")
+    )
     return {
         "schema_version": "1.0",
         "brand_id": brand_id,
         "created_at": datetime.now(UTC).isoformat(),
         "sample_count": metrics["sample_count"],
-        "label_distribution": metrics["label_distribution"],
+        "label_distribution": metrics.get("label_distribution", {}),
         "confidence": metrics.get("confidence_summary", {}),
         "quality_metrics": {
             "accuracy": metrics["accuracy"],
-            "done_when_not_done_fp_rate": metrics["done_when_not_done_fp_rate"],
+            "emergency_false_positive_rate": fp_rate,
+            "latency_ms": metrics.get("latency_ms"),
+            "not_done_sample_count": metrics.get("not_done_sample_count"),
+            "done_sample_count": metrics.get("done_sample_count"),
+            "missing_images": metrics.get("missing_images"),
+            # Legacy alias retained for backward compatibility with older
+            # baseline consumers.
+            "done_when_not_done_fp_rate": fp_rate,
         },
     }
 
