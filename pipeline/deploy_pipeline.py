@@ -46,8 +46,9 @@ from sagemaker.workflow.conditions import (
     ConditionGreaterThanOrEqualTo,
     ConditionLessThanOrEqualTo,
 )
+from sagemaker.workflow.execution_variables import ExecutionVariables
 from sagemaker.workflow.fail_step import FailStep
-from sagemaker.workflow.functions import JsonGet
+from sagemaker.workflow.functions import Join, JsonGet
 from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.workflow.properties import PropertyFile
@@ -111,11 +112,22 @@ def _relaxed_fields(config: dict[str, Any]) -> list[str]:
     return weak
 
 
+# S3 artifact root segments. ``PIPELINE_ARTIFACT_ROOT`` holds production
+# pipeline outputs; ``SMOKE_ARTIFACT_ROOT`` isolates relaxed/smoke runs so
+# they cannot overwrite production artifacts for the same brand. Both are
+# further scoped by ``brand_id`` and, per step destination, by the pipeline
+# execution id so concurrent executions and separate brands cannot collide
+# on the manifests, cleaned datasets, and gate ``metrics.json`` objects.
+PIPELINE_ARTIFACT_ROOT = "pipe"
+SMOKE_ARTIFACT_ROOT = "pipe-smoke"
+
+
 def build(
     config: dict,
     code_prefix: str,
     images_uri: str,
     pipeline_name: str | None = None,
+    is_smoke: bool = False,
 ) -> Pipeline:
     """Build the Miso SageMaker Pipeline for the first configured brand.
 
@@ -140,8 +152,31 @@ def build(
     sel = config["data_selection"]
     session = PipelineSession()
 
-    base = f"s3://{bucket}/miso-smoke"
-    code_channel = f"{base}/{code_prefix}"
+    # Scope every artifact location to the brand (tenant) and, at each step
+    # destination below, to the pipeline execution. ``brand_id`` is the
+    # already-validated tenant identifier (see ``get_brand`` above), and the
+    # root segment separates relaxed/smoke runs from production runs so a
+    # smoke run cannot overwrite production artifacts for the same brand.
+    artifact_root = SMOKE_ARTIFACT_ROOT if is_smoke else PIPELINE_ARTIFACT_ROOT
+    base = f"s3://{bucket}/{brand_id}/{artifact_root}"
+    # The code channel is uploaded by the deploy CLI before the execution
+    # starts, so it cannot use ``ExecutionVariables.PIPELINE_EXECUTION_ID``.
+    # Keep it on a dedicated per-brand prefix (``<brand>/code/...``) that is
+    # distinct from the per-execution artifact prefixes above; bucket
+    # policies / IAM conditions should prevent job roles from writing it.
+    code_channel = f"s3://{bucket}/{brand_id}/{code_prefix}"
+    execution_id = ExecutionVariables.PIPELINE_EXECUTION_ID
+
+    def _step_destination(*parts: str) -> Join:
+        """Build a per-execution S3 destination under the brand-scoped base.
+
+        The pipeline execution id is only resolvable at execution time, so
+        the destination has to be a SageMaker ``Join`` expression rather
+        than a Python string -- otherwise every execution would resolve to
+        the same URI and overwrite the previous run's artifacts.
+        """
+        tail = "/".join(parts)
+        return Join(on="/", values=[base, "executions", execution_id, tail])
 
     tf_image = retrieve(
         framework="tensorflow",
@@ -194,12 +229,12 @@ def build(
                 ProcessingOutput(
                     output_name="sel_dataset",
                     source="/opt/ml/processing/output/dataset",
-                    destination=f"{base}/pipe/select/dataset",
+                    destination=_step_destination("select", "dataset"),
                 ),
                 ProcessingOutput(
                     output_name="sel_metrics",
                     source="/opt/ml/processing/output/metrics",
-                    destination=f"{base}/pipe/select/metrics",
+                    destination=_step_destination("select", "metrics"),
                 ),
             ],
         ),
@@ -232,7 +267,7 @@ def build(
                 ProcessingOutput(
                     output_name="embed_dataset",
                     source="/opt/ml/processing/output/dataset",
-                    destination=f"{base}/pipe/embed/dataset",
+                    destination=_step_destination("embed", "dataset"),
                 )
             ],
         ),
@@ -270,12 +305,12 @@ def build(
                 ProcessingOutput(
                     output_name="quality_dataset",
                     source="/opt/ml/processing/output/dataset",
-                    destination=f"{base}/pipe/quality/dataset",
+                    destination=_step_destination("quality", "dataset"),
                 ),
                 ProcessingOutput(
                     output_name="quality_metrics",
                     source="/opt/ml/processing/output/metrics",
-                    destination=f"{base}/pipe/quality/metrics",
+                    destination=_step_destination("quality", "metrics"),
                 ),
             ],
         ),
@@ -318,7 +353,7 @@ def build(
                 ProcessingOutput(
                     output_name="drift_metrics",
                     source="/opt/ml/processing/output/metrics",
-                    destination=f"{base}/pipe/drift/metrics",
+                    destination=_step_destination("drift", "metrics"),
                 )
             ],
         ),
@@ -331,7 +366,7 @@ def build(
         role=role,
         instance_count=1,
         instance_type=config["training"]["instance_type"],
-        output_path=f"{base}/pipe/train",
+        output_path=Join(on="/", values=[base, "executions", execution_id, "train"]),
         sagemaker_session=session,
         base_job_name="miso-train",
         entry_point=str(STEPS_DIR / "train_step.py"),
@@ -392,7 +427,7 @@ def build(
                 ProcessingOutput(
                     output_name="eval_metrics",
                     source="/opt/ml/processing/output/metrics",
-                    destination=f"{base}/pipe/eval/metrics",
+                    destination=_step_destination("eval", "metrics"),
                 )
             ],
         ),
@@ -664,7 +699,13 @@ def main() -> None:
                 f"{SMOKE_PIPELINE_PREFIX!r})."
             )
 
-    pipeline = build(config, args.code_prefix, args.images_uri, pipeline_name=pipeline_name)
+    pipeline = build(
+        config,
+        args.code_prefix,
+        args.images_uri,
+        pipeline_name=pipeline_name,
+        is_smoke=is_relaxed,
+    )
     role = config["aws"]["sagemaker_role_arn"]
 
     if args.upsert:
