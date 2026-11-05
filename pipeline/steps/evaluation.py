@@ -151,19 +151,80 @@ def _positive_int(value, default: int) -> int:
         return default
 
 
+# Only the single, well-known artifact emitted by training/train.py is accepted
+# (``model.save(model_path / "model.keras")``). The model-artifacts channel is
+# mounted from an S3 prefix that is not trusted end-to-end (see the
+# pipeline/pipeline.py wiring and _safe_extract_tar above), so the loader must
+# not scan the mounted tree for "any .keras file" or "any directory containing
+# saved_model.pb": either behaviour lets an attacker who can write under the
+# model-artifacts prefix select the file deserialized by Keras and obtain code
+# execution (CWE-502). The loader additionally refuses the legacy HDF5 and
+# SavedModel formats, both of which reconstruct arbitrary Python/graph code
+# from the artifact, and requires the Keras v3 zip format with ``safe_mode=True``
+# so Lambda layers / dynamic imports from the config are rejected before any
+# attacker-authored code can run.
+_EXPECTED_MODEL_FILENAME = "model.keras"
+
+
+def _looks_like_keras_v3_zip(path: Path) -> bool:
+    """Return True iff ``path`` is a Keras v3 ``.keras`` zip archive.
+
+    The Keras v3 format is a ZIP container (magic bytes ``PK\\x03\\x04``) with a
+    ``metadata.json`` / ``config.json`` layout. Legacy HDF5 artifacts start with
+    the HDF5 signature ``\\x89HDF\\r\\n\\x1a\\n`` and SavedModel directories are not
+    files at all; both are rejected here before ``tf.keras.models.load_model``
+    is ever called with them.
+    """
+    import zipfile
+
+    if not path.is_file():
+        return False
+    try:
+        with path.open("rb") as handle:
+            signature = handle.read(4)
+    except OSError:
+        return False
+    if signature[:4] != b"PK\x03\x04":
+        return False
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+    except (zipfile.BadZipFile, OSError):
+        return False
+    # Keras v3 archives always ship these two members.
+    return "metadata.json" in names and "config.json" in names
+
+
 def _load_model(model_dir: Path):
     import tensorflow as tf
 
-    # train.py saves either a SavedModel dir or model.keras; find it.
-    for candidate in ("model.keras", "1", "model"):
-        p = model_dir / candidate
-        if p.exists():
-            return tf.keras.models.load_model(p)
-    # Fall back: first loadable entry.
-    for p in sorted(model_dir.rglob("*")):
-        if p.name.endswith(".keras") or (p.is_dir() and (p / "saved_model.pb").exists()):
-            return tf.keras.models.load_model(p)
-    raise FileNotFoundError(f"No loadable model found under {model_dir}")
+    # train.py writes exactly one artifact at ``<model_dir>/model.keras`` using
+    # the Keras v3 zip format. Only that single, well-known path is loaded; the
+    # previous rglob fallback and the ``1``/``model`` SavedModel candidates are
+    # intentionally removed so a stray file written under the model-artifacts
+    # prefix cannot be selected as the model.
+    path = model_dir / _EXPECTED_MODEL_FILENAME
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Expected trained model at {path!s}; refusing to search the mounted "
+            "model-artifacts tree for an alternative artifact."
+        )
+    if not path.is_file():
+        raise ValueError(
+            f"Expected {path!s} to be a regular Keras v3 archive; got a non-file entry. "
+            "Legacy SavedModel directories are not accepted by this step."
+        )
+    if not _looks_like_keras_v3_zip(path):
+        raise ValueError(
+            f"Model artifact at {path!s} is not a Keras v3 (.keras) zip archive. "
+            "Legacy HDF5 and SavedModel inputs are rejected because they "
+            "reconstruct arbitrary Python/graph code during load."
+        )
+    # ``safe_mode=True`` rejects Lambda layers and other Keras-config features
+    # that execute attacker-controlled code during deserialization. ``compile=False``
+    # avoids re-materialising the attacker-provided optimizer/loss (the step calls
+    # ``model.predict`` only, so compilation is unnecessary).
+    return tf.keras.models.load_model(path, safe_mode=True, compile=False)
 
 
 def main() -> None:
