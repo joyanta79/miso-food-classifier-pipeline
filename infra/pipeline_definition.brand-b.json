@@ -193,10 +193,12 @@
           "BRAND_ID": {
             "Get": "Parameters.BrandId"
           },
+          "DONE_LABEL": "done",
           "MIN_IMAGES_PER_CLASS": "500",
           "NAMING_PATTERN": {
             "Get": "Parameters.BrandNamingPattern"
           },
+          "NOT_DONE_LABEL": "not_done",
           "RECENCY_MONTHS": {
             "Get": "Parameters.RecencyMonths"
           },

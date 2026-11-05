@@ -438,6 +438,17 @@ def build_dry_run_definition(
             "TARGET_DATASET_MAX": _literal_env_value(
                 config["data_selection"]["target_dataset_max"]
             ),
+            # Operator-configured label allowlist (``evaluation.done_label`` /
+            # ``evaluation.not_done_label``). Injected as literals so a
+            # per-execution PipelineParameters override cannot broaden the
+            # label space that the SelectRecentBrandData step accepts
+            # (CWE-1286).
+            "DONE_LABEL": _literal_env_value(
+                config["evaluation"].get("done_label", "done")
+            ),
+            "NOT_DONE_LABEL": _literal_env_value(
+                config["evaluation"].get("not_done_label", "not_done")
+            ),
         },
         [
             {
