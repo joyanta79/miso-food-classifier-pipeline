@@ -186,6 +186,8 @@ def build(
                 "MIN_IMAGES_PER_CLASS": str(sel["min_images_per_class"]),
                 "TARGET_DATASET_MIN": str(sel["target_dataset_min"]),
                 "TARGET_DATASET_MAX": str(sel["target_dataset_max"]),
+                "DONE_LABEL": str(config["evaluation"].get("done_label", "done")),
+                "NOT_DONE_LABEL": str(config["evaluation"].get("not_done_label", "not_done")),
             }
         ).run(
             code=str(STEPS_DIR / "data_selection.py"),
@@ -339,6 +341,8 @@ def build(
             "BRAND_ID": brand_id,
             "EPOCHS": str(config["training"]["epochs"]),
             "BATCH_SIZE": str(config["training"]["batch_size"]),
+            "DONE_LABEL": str(config["evaluation"].get("done_label", "done")),
+            "NOT_DONE_LABEL": str(config["evaluation"].get("not_done_label", "not_done")),
         },
     )
     train_step = TrainingStep(
