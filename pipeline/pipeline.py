@@ -438,6 +438,15 @@ def build_dry_run_definition(
             "TARGET_DATASET_MAX": _literal_env_value(
                 config["data_selection"]["target_dataset_max"]
             ),
+            # Safety-class allowlist. Labels parsed from attacker-controlled
+            # filenames are rejected outside this set so the training step
+            # materialises exactly one Keras class directory per label.
+            "DONE_LABEL": _literal_env_value(
+                config["evaluation"].get("done_label", "done")
+            ),
+            "NOT_DONE_LABEL": _literal_env_value(
+                config["evaluation"].get("not_done_label", "not_done")
+            ),
         },
         [
             {
@@ -648,6 +657,18 @@ def build_dry_run_definition(
                 "checkpoint_every_epochs": _ref("CheckpointEveryEpochs"),
                 "image_size": _ref("ImageSize"),
                 "seed": _ref("Seed"),
+            },
+            "Environment": {
+                # Safety-class allowlist. The training step must materialise
+                # exactly one Keras class directory per label; refuse to run
+                # with labels outside this set. Injected as literals so a
+                # per-execution PipelineParameters override cannot relax it.
+                "DONE_LABEL": _literal_env_value(
+                    config["evaluation"].get("done_label", "done")
+                ),
+                "NOT_DONE_LABEL": _literal_env_value(
+                    config["evaluation"].get("not_done_label", "not_done")
+                ),
             },
             "Tags": [{"Key": "brand", "Value": _ref("BrandId")}],
         },

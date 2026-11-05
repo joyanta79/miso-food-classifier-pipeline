@@ -9,7 +9,11 @@ processing/step6_evaluate.py and processing/step7_register_and_baseline.py:
 truly-``not_done`` images predicted as ``done``. The reference class names are
 taken from CLI arguments (``--done-label`` / ``--not-done-label``) or the
 ``DONE_LABEL`` / ``NOT_DONE_LABEL`` environment variables, defaulting to
-``done`` / ``not_done`` -- never from alphabetical order.
+``done`` / ``not_done`` -- never from alphabetical order. The softmax
+index-to-class mapping comes from the ``class_names.json`` file written next
+to ``model.keras`` by ``training/train.py`` (never from sorted dataset
+labels), so an uploader-controlled filename token cannot shift the model's
+hazardous output onto the wrong index.
 
 The step fails closed: if any configured image file is missing, if the evaluated
 sample count or the per-class counts fall below the configured floors, or if the
@@ -219,30 +223,105 @@ def main() -> None:
     model = _load_model(model_dir)
 
     cleaned = json.loads(Path(args.cleaned).read_text(encoding="utf-8"))
-    labels_sorted = sorted({record["label"] for record in cleaned})
-    class_index = {label: i for i, label in enumerate(labels_sorted)}
+    dataset_labels = sorted({record["label"] for record in cleaned})
 
-    # Explicit label semantics: refuse to proceed if the hazardous reference
-    # class or the positive class is missing from the dataset. Alphabetical
-    # ordering is NOT used to pick the safety direction.
-    if not_done_label not in class_index:
+    # Allowlist of safety labels. Any dataset label outside this set is
+    # uploader-controlled noise (filename tokens are parsed verbatim by
+    # data_selection.py) and could shift the model's class ordering relative to
+    # the dataset-derived view; fail closed before we touch the model.
+    allowed_labels = {done_label, not_done_label}
+    unexpected = [label for label in dataset_labels if label not in allowed_labels]
+    if unexpected:
+        _abort(
+            metrics_out,
+            (
+                f"dataset labels {unexpected!r} are not in the configured safety "
+                f"allowlist {{{done_label!r}, {not_done_label!r}}}; refusing to "
+                "evaluate against uploader-controlled label values."
+            ),
+            {"classes": dataset_labels},
+        )
+    if not_done_label not in dataset_labels:
         _abort(
             metrics_out,
             (
                 f"not_done label {not_done_label!r} is not present in dataset classes "
-                f"{labels_sorted!r}; cannot measure the hazardous false-positive direction."
+                f"{dataset_labels!r}; cannot measure the hazardous false-positive direction."
             ),
-            {"classes": labels_sorted},
+            {"classes": dataset_labels},
         )
-    if done_label not in class_index:
+    if done_label not in dataset_labels:
         _abort(
             metrics_out,
             (
                 f"done label {done_label!r} is not present in dataset classes "
-                f"{labels_sorted!r}."
+                f"{dataset_labels!r}."
             ),
-            {"classes": labels_sorted},
+            {"classes": dataset_labels},
         )
+
+    # Index map comes from the MODEL, not from the dataset. train.py writes
+    # class_names.json alongside model.keras, mirroring the subdirectory order
+    # that Keras assigned to the softmax output. Deriving the index from this
+    # file (and asserting it matches the model's output width) closes the
+    # inversion where an uploader-reachable filename token (empty label,
+    # dot-prefixed label, ...) shifts the dataset-derived mapping by one.
+    class_names_path = model_dir / "class_names.json"
+    if not class_names_path.exists():
+        for candidate in model_dir.rglob("class_names.json"):
+            class_names_path = candidate
+            break
+    if not class_names_path.exists():
+        _abort(
+            metrics_out,
+            (
+                "model artifact is missing class_names.json; cannot verify the "
+                "softmax-index -> class mapping, so refusing to compute the "
+                "hazardous false-positive rate."
+            ),
+            {"classes": dataset_labels},
+        )
+    try:
+        model_class_names = json.loads(class_names_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        _abort(
+            metrics_out,
+            f"model class_names.json is not parseable JSON: {error}",
+            {"classes": dataset_labels},
+        )
+    if not isinstance(model_class_names, list) or not all(
+        isinstance(name, str) for name in model_class_names
+    ):
+        _abort(
+            metrics_out,
+            (
+                f"model class_names.json has unexpected shape {type(model_class_names).__name__}; "
+                "expected a JSON list of strings matching the model's softmax output ordering."
+            ),
+            {"classes": dataset_labels},
+        )
+    if done_label not in model_class_names:
+        _abort(
+            metrics_out,
+            (
+                f"done label {done_label!r} is not present in model class_names "
+                f"{model_class_names!r}; the trained model cannot represent the "
+                "configured safety direction."
+            ),
+            {"classes": model_class_names},
+        )
+    if not_done_label not in model_class_names:
+        _abort(
+            metrics_out,
+            (
+                f"not_done label {not_done_label!r} is not present in model class_names "
+                f"{model_class_names!r}; cannot measure the hazardous false-positive direction."
+            ),
+            {"classes": model_class_names},
+        )
+    class_index = {name: i for i, name in enumerate(model_class_names)}
+    done_class_index = class_index[done_label]
+    not_done_class_index = class_index[not_done_label]
 
     images_root = Path(args.images)
     correct = 0
@@ -251,6 +330,7 @@ def main() -> None:
     not_done_evaluated = 0
     done_evaluated = 0
     missing_images = 0
+    model_output_width: int | None = None
     latencies: list[float] = []
     for record in cleaned:
         path = images_root / record["image_path"]
@@ -267,14 +347,41 @@ def main() -> None:
         started = time.perf_counter()
         probs = model.predict(x, verbose=0)[0]
         latencies.append((time.perf_counter() - started) * 1000)
+        # The model's softmax output width must match the class_names.json
+        # taken from the artifact. If it does not, the index map we built
+        # cannot be trusted.
+        if model_output_width is None:
+            model_output_width = int(np.shape(probs)[-1])
+            if model_output_width != len(model_class_names):
+                _abort(
+                    metrics_out,
+                    (
+                        f"model output width {model_output_width} does not match "
+                        f"class_names.json length {len(model_class_names)}; the artifact "
+                        "is inconsistent with its declared class ordering."
+                    ),
+                    {
+                        "classes": model_class_names,
+                        "sample_count": total,
+                        "not_done_sample_count": not_done_evaluated,
+                        "done_sample_count": done_evaluated,
+                        "missing_images": missing_images,
+                    },
+                )
         pred_idx = int(np.argmax(probs))
         true_label = record["label"]
-        if true_label not in class_index:
+        # Dataset labels are allowlisted above, but defend in depth in case
+        # cleaned_dataset.json is edited between the allowlist check and the
+        # evaluation loop.
+        if true_label not in allowed_labels:
             _abort(
                 metrics_out,
-                f"record label {true_label!r} not in known classes {labels_sorted!r}",
+                (
+                    f"record label {true_label!r} is not in the configured safety "
+                    f"allowlist {{{done_label!r}, {not_done_label!r}}}"
+                ),
                 {
-                    "classes": labels_sorted,
+                    "classes": model_class_names,
                     "sample_count": total,
                     "not_done_sample_count": not_done_evaluated,
                     "done_sample_count": done_evaluated,
@@ -282,19 +389,22 @@ def main() -> None:
                 },
             )
         true_idx = class_index[true_label]
+        # Accuracy is counted only over the two safety classes so a diluting
+        # phantom class cannot pad the numerator (defence in depth; the
+        # allowlist above already rejects such records).
         total += 1
         if pred_idx == true_idx:
             correct += 1
         # Emergency FP: truly-not_done image predicted as done (hazardous direction).
         if true_label == not_done_label:
             not_done_evaluated += 1
-            if pred_idx == class_index[done_label]:
+            if pred_idx == done_class_index:
                 false_positives += 1
         elif true_label == done_label:
             done_evaluated += 1
 
     extras = {
-        "classes": labels_sorted,
+        "classes": model_class_names,
         "sample_count": total,
         "not_done_sample_count": not_done_evaluated,
         "done_sample_count": done_evaluated,
@@ -352,7 +462,7 @@ def main() -> None:
         "not_done_sample_count": not_done_evaluated,
         "done_sample_count": done_evaluated,
         "missing_images": missing_images,
-        "classes": labels_sorted,
+        "classes": model_class_names,
     }
     _write_metrics(metrics_out, metrics)
     print(

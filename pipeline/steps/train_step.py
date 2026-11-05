@@ -43,11 +43,32 @@ def _dest_filename(record: dict) -> str:
 
 
 def _prep_class_dirs(
-    images_root: Path, cleaned: list[dict], work: Path, val_fraction: float = 0.2
+    images_root: Path,
+    cleaned: list[dict],
+    work: Path,
+    val_fraction: float = 0.2,
+    *,
+    allowed_labels: frozenset[str] | None = None,
 ) -> None:
     by_class: dict[str, list[dict]] = {}
     for record in cleaned:
-        by_class.setdefault(record["label"], []).append(record)
+        label = record["label"]
+        # Reject labels outside the configured safety allowlist. Labels are
+        # parsed verbatim from an attacker-controlled filename by
+        # data_selection.py, and the training step must materialise exactly
+        # one Keras class directory per label. Values like ``""`` collapse to
+        # the split root (train_root / "" == train_root) and dot-prefixed
+        # labels are skipped by tf.keras.utils.image_dataset_from_directory,
+        # so letting them through would shift the model's softmax output
+        # ordering relative to what EvaluateModel sees.
+        if allowed_labels is not None and label not in allowed_labels:
+            raise ValueError(
+                f"[train_step] manifest contains label {label!r} outside the "
+                f"configured safety allowlist {sorted(allowed_labels)!r}; "
+                "refusing to train on data that cannot be materialised as a "
+                "single Keras class directory."
+            )
+        by_class.setdefault(label, []).append(record)
     train_root = work / "train"
     val_root = work / "validation"
     copied_counts: dict[str, int] = {}
@@ -96,8 +117,20 @@ def main() -> None:
 
     cleaned = json.loads((dataset_root / "cleaned_dataset.json").read_text(encoding="utf-8"))
 
+    # Safety-class allowlist. The training step must materialise exactly one
+    # Keras class directory per label, so refuse to run with labels outside
+    # the configured allowlist (defaults mirror evaluation.py).
+    done_label = os.environ.get("DONE_LABEL", "done").strip()
+    not_done_label = os.environ.get("NOT_DONE_LABEL", "not_done").strip()
+    if not done_label or not not_done_label:
+        raise ValueError(
+            "[train_step] DONE_LABEL and NOT_DONE_LABEL must be non-empty; "
+            "refusing to run without a safety-class allowlist."
+        )
+    allowed_labels = frozenset({done_label, not_done_label})
+
     work = Path("/opt/ml/input/prepared")
-    _prep_class_dirs(images_root, cleaned, work)
+    _prep_class_dirs(images_root, cleaned, work, allowed_labels=allowed_labels)
 
     # Build the config inline so the runner does not depend on config.yaml being
     # staged; force the real ImageNet backbone and a small epoch count for smoke.

@@ -93,6 +93,7 @@ def select(
     min_images_per_class: int,
     target_dataset_min: int,
     target_dataset_max: int,
+    allowed_labels: frozenset[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Build the curated manifest and selection metrics for one brand.
 
@@ -103,6 +104,13 @@ def select(
     ``brand_id`` is accepted for logging/metadata but is not used as the
     attribution key, because the configured ``brand.id`` (e.g. ``white-castle``)
     does not have to equal the filename brand token (``wc``).
+
+    ``allowed_labels`` restricts which parsed label values are retained in
+    the curated manifest. Labels are parsed verbatim from an attacker-
+    controlled filename, so values outside the allowlist (empty string,
+    dot-prefixed tokens, unexpected classes, ...) are dropped and would
+    otherwise shift the trained model's class ordering relative to the
+    dataset view used by the evaluation step.
     """
     if not naming_pattern:
         raise ValueError(
@@ -134,6 +142,15 @@ def select(
         # configured naming pattern -- otherwise an uploader who guesses
         # another brand's convention can poison this brand's dataset.
         if brand != expected_brand:
+            continue
+        # Reject labels outside the configured safety allowlist. Labels are
+        # parsed verbatim from the filename, so unexpected values (empty
+        # string from ``wc__0.9.jpg``, dot-prefixed from ``wc_.x_0.9.jpg``,
+        # ...) would otherwise be materialised as either no class directory
+        # (empty) or a hidden class directory Keras skips (dot-prefixed),
+        # shifting the model's softmax output ordering relative to the
+        # dataset-derived index map used by EvaluateModel.
+        if allowed_labels is not None and label not in allowed_labels:
             continue
         # Record the path relative to ``image_root`` as a POSIX string so that
         # discovery (``rglob``) and resolution (``images_root / image_path``)
@@ -201,6 +218,21 @@ def main() -> None:
     target_dataset_min = int(os.environ.get("TARGET_DATASET_MIN", "40"))
     target_dataset_max = int(os.environ.get("TARGET_DATASET_MAX", "50000"))
 
+    # Safety-class allowlist. Defaults mirror evaluation.py so a label parsed
+    # out of an attacker-controlled filename cannot introduce a phantom
+    # Keras class directory (or a hidden one Keras skips) and shift the
+    # softmax output ordering.
+    done_label = os.environ.get("DONE_LABEL", "done").strip()
+    not_done_label = os.environ.get("NOT_DONE_LABEL", "not_done").strip()
+    if not done_label or not not_done_label:
+        print(
+            "[data_selection] FATAL: DONE_LABEL and NOT_DONE_LABEL must be "
+            "non-empty; refusing to run without a safety-class allowlist.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    allowed_labels = frozenset({done_label, not_done_label})
+
     manifest, metrics = select(
         Path(args.images),
         naming_pattern,
@@ -208,6 +240,7 @@ def main() -> None:
         min_images_per_class=min_images_per_class,
         target_dataset_min=target_dataset_min,
         target_dataset_max=target_dataset_max,
+        allowed_labels=allowed_labels,
     )
 
     dataset_out = Path(args.dataset_out)
