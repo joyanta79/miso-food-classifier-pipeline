@@ -233,7 +233,17 @@
               "S3Output": {
                 "LocalPath": "/opt/ml/processing/output/dataset",
                 "S3UploadMode": "EndOfJob",
-                "S3Uri": "s3://<replace-training-bucket>/white-castle/selected"
+                "S3Uri": {
+                  "Std:Join": {
+                    "On": "/",
+                    "Values": [
+                      "s3://<replace-training-bucket>/white-castle/selected",
+                      {
+                        "Get": "Execution.PipelineExecutionId"
+                      }
+                    ]
+                  }
+                }
               }
             },
             {
@@ -241,7 +251,17 @@
               "S3Output": {
                 "LocalPath": "/opt/ml/processing/output/metrics",
                 "S3UploadMode": "EndOfJob",
-                "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/white-castle/selection"
+                "S3Uri": {
+                  "Std:Join": {
+                    "On": "/",
+                    "Values": [
+                      "s3://<replace-pipeline-artifacts-bucket>/white-castle/selection",
+                      {
+                        "Get": "Execution.PipelineExecutionId"
+                      }
+                    ]
+                  }
+                }
               }
             }
           ]
@@ -353,7 +373,17 @@
                     "LocalPath": "/opt/ml/processing/input/dataset",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
-                    "S3Uri": "s3://<replace-training-bucket>/white-castle/selected"
+                    "S3Uri": {
+                      "Std:Join": {
+                        "On": "/",
+                        "Values": [
+                          "s3://<replace-training-bucket>/white-castle/selected",
+                          {
+                            "Get": "Execution.PipelineExecutionId"
+                          }
+                        ]
+                      }
+                    }
                   }
                 },
                 {
@@ -373,7 +403,17 @@
                     "S3Output": {
                       "LocalPath": "/opt/ml/processing/output/dataset",
                       "S3UploadMode": "EndOfJob",
-                      "S3Uri": "s3://<replace-training-bucket>/white-castle/deduplicated"
+                      "S3Uri": {
+                        "Std:Join": {
+                          "On": "/",
+                          "Values": [
+                            "s3://<replace-training-bucket>/white-castle/deduplicated",
+                            {
+                              "Get": "Execution.PipelineExecutionId"
+                            }
+                          ]
+                        }
+                      }
                     }
                   }
                 ]
@@ -422,7 +462,17 @@
                     "LocalPath": "/opt/ml/processing/input/dataset",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
-                    "S3Uri": "s3://<replace-training-bucket>/white-castle/deduplicated"
+                    "S3Uri": {
+                      "Std:Join": {
+                        "On": "/",
+                        "Values": [
+                          "s3://<replace-training-bucket>/white-castle/deduplicated",
+                          {
+                            "Get": "Execution.PipelineExecutionId"
+                          }
+                        ]
+                      }
+                    }
                   }
                 },
                 {
@@ -442,7 +492,17 @@
                     "S3Output": {
                       "LocalPath": "/opt/ml/processing/output/dataset",
                       "S3UploadMode": "EndOfJob",
-                      "S3Uri": "s3://<replace-training-bucket>/white-castle/quality"
+                      "S3Uri": {
+                        "Std:Join": {
+                          "On": "/",
+                          "Values": [
+                            "s3://<replace-training-bucket>/white-castle/quality",
+                            {
+                              "Get": "Execution.PipelineExecutionId"
+                            }
+                          ]
+                        }
+                      }
                     }
                   },
                   {
@@ -450,7 +510,17 @@
                     "S3Output": {
                       "LocalPath": "/opt/ml/processing/output/metrics",
                       "S3UploadMode": "EndOfJob",
-                      "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/white-castle/quality"
+                      "S3Uri": {
+                        "Std:Join": {
+                          "On": "/",
+                          "Values": [
+                            "s3://<replace-pipeline-artifacts-bucket>/white-castle/quality",
+                            {
+                              "Get": "Execution.PipelineExecutionId"
+                            }
+                          ]
+                        }
+                      }
                     }
                   }
                 ]
@@ -564,7 +634,17 @@
                           "LocalPath": "/opt/ml/processing/input/dataset",
                           "S3DataType": "S3Prefix",
                           "S3InputMode": "File",
-                          "S3Uri": "s3://<replace-training-bucket>/white-castle/quality"
+                          "S3Uri": {
+                            "Std:Join": {
+                              "On": "/",
+                              "Values": [
+                                "s3://<replace-training-bucket>/white-castle/quality",
+                                {
+                                  "Get": "Execution.PipelineExecutionId"
+                                }
+                              ]
+                            }
+                          }
                         }
                       },
                       {
@@ -584,7 +664,17 @@
                           "S3Output": {
                             "LocalPath": "/opt/ml/processing/output/metrics",
                             "S3UploadMode": "EndOfJob",
-                            "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/white-castle/drift"
+                            "S3Uri": {
+                              "Std:Join": {
+                                "On": "/",
+                                "Values": [
+                                  "s3://<replace-pipeline-artifacts-bucket>/white-castle/drift",
+                                  {
+                                    "Get": "Execution.PipelineExecutionId"
+                                  }
+                                ]
+                              }
+                            }
                           }
                         }
                       ]
@@ -659,7 +749,17 @@
                             "TrainingInputMode": "File"
                           },
                           "CheckpointConfig": {
-                            "S3Uri": "s3://<replace-model-artifacts-bucket>/white-castle/checkpoints"
+                            "S3Uri": {
+                              "Std:Join": {
+                                "On": "/",
+                                "Values": [
+                                  "s3://<replace-model-artifacts-bucket>/white-castle/checkpoints",
+                                  {
+                                    "Get": "Execution.PipelineExecutionId"
+                                  }
+                                ]
+                              }
+                            }
                           },
                           "EnableManagedSpotTraining": {
                             "Get": "Parameters.UseSpot"
@@ -694,7 +794,17 @@
                                 "S3DataSource": {
                                   "S3DataDistributionType": "FullyReplicated",
                                   "S3DataType": "S3Prefix",
-                                  "S3Uri": "s3://<replace-training-bucket>/white-castle/quality"
+                                  "S3Uri": {
+                                    "Std:Join": {
+                                      "On": "/",
+                                      "Values": [
+                                        "s3://<replace-training-bucket>/white-castle/quality",
+                                        {
+                                          "Get": "Execution.PipelineExecutionId"
+                                        }
+                                      ]
+                                    }
+                                  }
                                 }
                               }
                             },
@@ -710,7 +820,17 @@
                             }
                           ],
                           "OutputDataConfig": {
-                            "S3OutputPath": "s3://<replace-model-artifacts-bucket>/white-castle"
+                            "S3OutputPath": {
+                              "Std:Join": {
+                                "On": "/",
+                                "Values": [
+                                  "s3://<replace-model-artifacts-bucket>/white-castle",
+                                  {
+                                    "Get": "Execution.PipelineExecutionId"
+                                  }
+                                ]
+                              }
+                            }
                           },
                           "ResourceConfig": {
                             "InstanceCount": 1,
@@ -761,7 +881,17 @@
                                 "LocalPath": "/opt/ml/processing/input/model",
                                 "S3DataType": "S3Prefix",
                                 "S3InputMode": "File",
-                                "S3Uri": "s3://<replace-model-artifacts-bucket>/white-castle"
+                                "S3Uri": {
+                                  "Std:Join": {
+                                    "On": "/",
+                                    "Values": [
+                                      "s3://<replace-model-artifacts-bucket>/white-castle",
+                                      {
+                                        "Get": "Execution.PipelineExecutionId"
+                                      }
+                                    ]
+                                  }
+                                }
                               }
                             },
                             {
@@ -781,7 +911,17 @@
                                 "S3Output": {
                                   "LocalPath": "/opt/ml/processing/output/metrics",
                                   "S3UploadMode": "EndOfJob",
-                                  "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/white-castle/evaluation"
+                                  "S3Uri": {
+                                    "Std:Join": {
+                                      "On": "/",
+                                      "Values": [
+                                        "s3://<replace-pipeline-artifacts-bucket>/white-castle/evaluation",
+                                        {
+                                          "Get": "Execution.PipelineExecutionId"
+                                        }
+                                      ]
+                                    }
+                                  }
                                 }
                               }
                             ]
@@ -948,7 +1088,18 @@
                                   "ModelQuality": {
                                     "Statistics": {
                                       "ContentType": "application/json",
-                                      "S3Uri": "s3://<replace-pipeline-artifacts-bucket>/white-castle/evaluation/metrics.json"
+                                      "S3Uri": {
+                                        "Std:Join": {
+                                          "On": "/",
+                                          "Values": [
+                                            "s3://<replace-pipeline-artifacts-bucket>/white-castle/evaluation",
+                                            {
+                                              "Get": "Execution.PipelineExecutionId"
+                                            },
+                                            "metrics.json"
+                                          ]
+                                        }
+                                      }
                                     }
                                   }
                                 },

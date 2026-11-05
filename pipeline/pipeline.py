@@ -294,6 +294,43 @@ def _s3_uri(bucket: str, *parts: str) -> str:
     return f"s3://{bucket}{suffix}"
 
 
+# SageMaker native-definition representation of the ``PipelineExecutionId``
+# execution variable. Qualifying every per-brand mutable output prefix with
+# this value prevents two concurrent executions of one brand's pipeline from
+# sharing artifact or metrics.json locations (which would otherwise let one
+# run read another run's metrics across the safety gates).
+_PIPELINE_EXECUTION_ID_REF: dict[str, str] = {"Get": "Execution.PipelineExecutionId"}
+
+
+def _execution_scoped_s3_uri(
+    bucket: str, *parts: str, trailing: str | None = None
+) -> dict[str, Any]:
+    """Return an execution-scoped ``s3://`` URI as a SageMaker ``Std:Join``.
+
+    The returned structure resolves at pipeline-execution time to
+    ``s3://<bucket>/<parts>/<PipelineExecutionId>`` -- i.e. the usual static
+    literal with the SageMaker execution id appended as the final path
+    segment. Serialising it as a ``Std:Join`` on ``/`` is the documented
+    SageMaker native-definition way to interpolate
+    ``ExecutionVariables.PipelineExecutionId`` into an output location.
+
+    When ``trailing`` is given, it is appended after the execution id so the
+    URI resolves to ``s3://<bucket>/<parts>/<PipelineExecutionId>/<trailing>``;
+    this lets us pin a specific per-execution file (e.g. ``metrics.json``) in
+    an execution-scoped prefix without putting the execution id after the
+    file name.
+
+    The bucket name is still validated as a non-empty literal so a caller
+    cannot redirect the output to a different bucket; only the final
+    per-execution segment is dynamic.
+    """
+    base = _s3_uri(bucket, *parts)
+    values: list[Any] = [base, _PIPELINE_EXECUTION_ID_REF]
+    if trailing:
+        values.append(trailing)
+    return {"Std:Join": {"On": "/", "Values": values}}
+
+
 def _environment(*pairs: tuple[str, str]) -> dict[str, Any]:
     return {key: _ref(parameter) for key, parameter in pairs}
 
@@ -406,7 +443,7 @@ def build_dry_run_definition(
             {
                 "OutputName": "selected-dataset",
                 "S3Output": {
-                    "S3Uri": _s3_uri(training_bucket, brand.id, "selected"),
+                    "S3Uri": _execution_scoped_s3_uri(training_bucket, brand.id, "selected"),
                     "LocalPath": "/opt/ml/processing/output/dataset",
                     "S3UploadMode": "EndOfJob",
                 },
@@ -414,7 +451,7 @@ def build_dry_run_definition(
             {
                 "OutputName": "selection-metrics",
                 "S3Output": {
-                    "S3Uri": _s3_uri(pipeline_artifacts_bucket, brand.id, "selection"),
+                    "S3Uri": _execution_scoped_s3_uri(pipeline_artifacts_bucket, brand.id, "selection"),
                     "LocalPath": "/opt/ml/processing/output/metrics",
                     "S3UploadMode": "EndOfJob",
                 },
@@ -457,7 +494,7 @@ def build_dry_run_definition(
             {
                 "InputName": "selected-dataset",
                 "S3Input": {
-                    "S3Uri": _s3_uri(training_bucket, brand.id, "selected"),
+                    "S3Uri": _execution_scoped_s3_uri(training_bucket, brand.id, "selected"),
                     "LocalPath": "/opt/ml/processing/input/dataset",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
@@ -468,7 +505,7 @@ def build_dry_run_definition(
             {
                 "OutputName": "deduplicated-dataset",
                 "S3Output": {
-                    "S3Uri": _s3_uri(training_bucket, brand.id, "deduplicated"),
+                    "S3Uri": _execution_scoped_s3_uri(training_bucket, brand.id, "deduplicated"),
                     "LocalPath": "/opt/ml/processing/output/dataset",
                     "S3UploadMode": "EndOfJob",
                 },
@@ -493,7 +530,7 @@ def build_dry_run_definition(
             {
                 "InputName": "deduplicated-dataset",
                 "S3Input": {
-                    "S3Uri": _s3_uri(training_bucket, brand.id, "deduplicated"),
+                    "S3Uri": _execution_scoped_s3_uri(training_bucket, brand.id, "deduplicated"),
                     "LocalPath": "/opt/ml/processing/input/dataset",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
@@ -504,7 +541,7 @@ def build_dry_run_definition(
             {
                 "OutputName": "quality-dataset",
                 "S3Output": {
-                    "S3Uri": _s3_uri(training_bucket, brand.id, "quality"),
+                    "S3Uri": _execution_scoped_s3_uri(training_bucket, brand.id, "quality"),
                     "LocalPath": "/opt/ml/processing/output/dataset",
                     "S3UploadMode": "EndOfJob",
                 },
@@ -512,7 +549,7 @@ def build_dry_run_definition(
             {
                 "OutputName": "quality-metrics",
                 "S3Output": {
-                    "S3Uri": _s3_uri(pipeline_artifacts_bucket, brand.id, "quality"),
+                    "S3Uri": _execution_scoped_s3_uri(pipeline_artifacts_bucket, brand.id, "quality"),
                     "LocalPath": "/opt/ml/processing/output/metrics",
                     "S3UploadMode": "EndOfJob",
                 },
@@ -555,7 +592,7 @@ def build_dry_run_definition(
             {
                 "InputName": "quality-dataset",
                 "S3Input": {
-                    "S3Uri": _s3_uri(training_bucket, brand.id, "quality"),
+                    "S3Uri": _execution_scoped_s3_uri(training_bucket, brand.id, "quality"),
                     "LocalPath": "/opt/ml/processing/input/dataset",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
@@ -566,7 +603,7 @@ def build_dry_run_definition(
             {
                 "OutputName": "drift-metrics",
                 "S3Output": {
-                    "S3Uri": _s3_uri(pipeline_artifacts_bucket, brand.id, "drift"),
+                    "S3Uri": _execution_scoped_s3_uri(pipeline_artifacts_bucket, brand.id, "drift"),
                     "LocalPath": "/opt/ml/processing/output/metrics",
                     "S3UploadMode": "EndOfJob",
                 },
@@ -611,7 +648,7 @@ def build_dry_run_definition(
                     "DataSource": {
                         "S3DataSource": {
                             "S3DataType": "S3Prefix",
-                            "S3Uri": _s3_uri(training_bucket, brand.id, "quality"),
+                            "S3Uri": _execution_scoped_s3_uri(training_bucket, brand.id, "quality"),
                             "S3DataDistributionType": "FullyReplicated",
                         }
                     },
@@ -628,7 +665,7 @@ def build_dry_run_definition(
                 },
             ],
             "OutputDataConfig": {
-                "S3OutputPath": _s3_uri(model_artifacts_bucket, brand.id)
+                "S3OutputPath": _execution_scoped_s3_uri(model_artifacts_bucket, brand.id)
             },
             "ResourceConfig": {
                 "InstanceType": _ref("TrainingInstanceType"),
@@ -638,7 +675,7 @@ def build_dry_run_definition(
             "StoppingCondition": {"MaxRuntimeInSeconds": 86_400, "MaxWaitTimeInSeconds": 172_800},
             "EnableManagedSpotTraining": _ref("UseSpot"),
             "CheckpointConfig": {
-                "S3Uri": _s3_uri(model_artifacts_bucket, brand.id, "checkpoints")
+                "S3Uri": _execution_scoped_s3_uri(model_artifacts_bucket, brand.id, "checkpoints")
             },
             "HyperParameters": {
                 "classifier": _ref("Classifier"),
@@ -662,7 +699,7 @@ def build_dry_run_definition(
             {
                 "InputName": "model-artifacts",
                 "S3Input": {
-                    "S3Uri": _s3_uri(model_artifacts_bucket, brand.id),
+                    "S3Uri": _execution_scoped_s3_uri(model_artifacts_bucket, brand.id),
                     "LocalPath": "/opt/ml/processing/input/model",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
@@ -673,7 +710,7 @@ def build_dry_run_definition(
             {
                 "OutputName": "evaluation-metrics",
                 "S3Output": {
-                    "S3Uri": _s3_uri(pipeline_artifacts_bucket, brand.id, "evaluation"),
+                    "S3Uri": _execution_scoped_s3_uri(pipeline_artifacts_bucket, brand.id, "evaluation"),
                     "LocalPath": "/opt/ml/processing/output/metrics",
                     "S3UploadMode": "EndOfJob",
                 },
@@ -738,11 +775,11 @@ def build_dry_run_definition(
                 "ModelQuality": {
                     "Statistics": {
                         "ContentType": "application/json",
-                        "S3Uri": _s3_uri(
+                        "S3Uri": _execution_scoped_s3_uri(
                             pipeline_artifacts_bucket,
                             brand.id,
                             "evaluation",
-                            "metrics.json",
+                            trailing="metrics.json",
                         ),
                     }
                 }
@@ -1302,8 +1339,9 @@ def build_sagemaker_pipeline(
             ConditionGreaterThanOrEqualTo,
             ConditionLessThanOrEqualTo,
         )
+        from sagemaker.workflow.execution_variables import ExecutionVariables
         from sagemaker.workflow.fail_step import FailStep
-        from sagemaker.workflow.functions import JsonGet
+        from sagemaker.workflow.functions import Join, JsonGet
         from sagemaker.workflow.pipeline import Pipeline
         from sagemaker.workflow.pipeline_context import PipelineSession
         from sagemaker.workflow.properties import PropertyFile
@@ -1322,8 +1360,40 @@ def build_sagemaker_pipeline(
     session = PipelineSession()
     role = config["aws"]["sagemaker_role_arn"]
     code_root = f"s3://{config['s3']['pipeline_artifacts_bucket']}/code"
-    output_root = f"s3://{config['s3']['pipeline_artifacts_bucket']}/{brand.id}"
-
+    # Per-execution output root. Qualifying every mutable per-brand prefix
+    # with ``ExecutionVariables.PIPELINE_EXECUTION_ID`` ensures two concurrent
+    # executions of this brand's pipeline cannot share artifact or metrics
+    # locations, so one run's gate ``metrics.json`` cannot be overwritten by
+    # another run of the same brand before the safety gates read it.
+    pipeline_execution_id = ExecutionVariables.PIPELINE_EXECUTION_ID
+    output_root = Join(
+        on="/",
+        values=[
+            f"s3://{config['s3']['pipeline_artifacts_bucket']}/{brand.id}",
+            pipeline_execution_id,
+        ],
+    )
+    training_root = Join(
+        on="/",
+        values=[
+            f"s3://{config['s3']['training_bucket']}/{brand.id}",
+            pipeline_execution_id,
+        ],
+    )
+    model_output_path = Join(
+        on="/",
+        values=[
+            f"s3://{config['s3']['model_artifacts_bucket']}/{brand.id}",
+            pipeline_execution_id,
+        ],
+    )
+    checkpoint_s3_uri = Join(
+        on="/",
+        values=[
+            f"s3://{config['s3']['model_artifacts_bucket']}/{brand.id}/checkpoints",
+            pipeline_execution_id,
+        ],
+    )
     processor = ScriptProcessor(
         image_uri="683313688378.dkr.ecr.us-west-2.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3",
         command=["python3"],
@@ -1346,7 +1416,7 @@ def build_sagemaker_pipeline(
                 code=f"{code_root}/{script}",
                 inputs=[
                     ProcessingInput(
-                        source=f"s3://{config['s3']['training_bucket']}/{brand.id}",
+                        source=training_root,
                         destination="/opt/ml/processing/input/dataset",
                     )
                 ],
@@ -1354,7 +1424,7 @@ def build_sagemaker_pipeline(
                     ProcessingOutput(
                         output_name=output_name,
                         source="/opt/ml/processing/output",
-                        destination=f"{output_root}/{output_name}",
+                        destination=Join(on="/", values=[output_root, output_name]),
                     )
                 ],
                 environment=environment,
@@ -1415,8 +1485,8 @@ def build_sagemaker_pipeline(
         role=role,
         instance_count=1,
         instance_type=training["instance_type"],
-        output_path=f"s3://{config['s3']['model_artifacts_bucket']}/{brand.id}",
-        checkpoint_s3_uri=f"s3://{config['s3']['model_artifacts_bucket']}/{brand.id}/checkpoints",
+        output_path=model_output_path,
+        checkpoint_s3_uri=checkpoint_s3_uri,
         use_spot_instances=training["use_spot"],
         max_run=86_400,
         max_wait=172_800,

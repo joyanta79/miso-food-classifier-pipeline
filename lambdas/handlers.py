@@ -203,10 +203,11 @@ def _pipeline_execution_display_name(
 ) -> str:
     """Deterministic display name scoped to brand + current throttle window.
 
-    SageMaker enforces that ``PipelineExecutionDisplayName`` is unique per
-    pipeline, so two starts for the same brand that fall inside the same
-    window collide and the second call fails fast (idempotent retry) instead
-    of booting a second GPU training job.
+    The display name is purely for operator readability -- SageMaker does not
+    enforce uniqueness on ``PipelineExecutionDisplayName``. Idempotency is
+    provided by the ``ClientRequestToken`` passed to
+    ``StartPipelineExecution`` (see ``_pipeline_client_request_token``), which
+    the API documents as the duplicate-request guard.
     """
     window = _idempotency_window_seconds()
     bucket = int((now if now is not None else time.time()) // window)
@@ -215,6 +216,30 @@ def _pipeline_execution_display_name(
     ).hexdigest()[:12]
     safe_brand = "".join(ch if ch.isalnum() or ch == "-" else "-" for ch in brand_id)[:40]
     return f"brand-{safe_brand}-{bucket}-{digest}"
+
+
+def _pipeline_client_request_token(
+    brand_id: str, pipeline_name: str, now: float | None = None
+) -> str:
+    """Return a deterministic ``ClientRequestToken`` for brand + throttle window.
+
+    SageMaker ``StartPipelineExecution`` documents ``ClientRequestToken`` as
+    the control that makes retries idempotent: two starts for the same
+    pipeline sharing a token collide server-side instead of launching
+    duplicate executions. Deriving the token from ``(pipeline_name, brand_id,
+    window_bucket)`` means any two triggers inside the same throttle window
+    produce the same token, so the API -- not a race-prone list-then-start
+    check -- enforces single-flight behaviour per brand per window.
+
+    The returned token matches the API's documented character set (letters,
+    digits, hyphen, underscore) and length limit (<= 128 characters).
+    """
+    window = _idempotency_window_seconds()
+    bucket = int((now if now is not None else time.time()) // window)
+    digest = hashlib.sha256(
+        f"{pipeline_name}:{brand_id}:{bucket}".encode()
+    ).hexdigest()
+    return f"miso-{bucket}-{digest}"[:128]
 
 
 def _has_in_flight_execution(sagemaker: Any, pipeline_name: str, brand_id: str) -> bool:
@@ -257,9 +282,13 @@ def eventbridge_trigger_handler(
     """Start the per-brand SageMaker pipeline from an EventBridge request.
 
     Guards against upload storms by (1) short-circuiting when an execution for
-    the same brand is already running and (2) pinning a deterministic
-    ``PipelineExecutionDisplayName`` so retries inside the throttle window
-    collide instead of launching new GPU training jobs.
+    the same brand is already running (best-effort optimisation only -- the
+    list-then-start check is not atomic across concurrent invocations) and
+    (2) passing a deterministic ``ClientRequestToken`` scoped to brand +
+    throttle window, which is the control SageMaker documents for idempotent
+    retries. A deterministic ``PipelineExecutionDisplayName`` is attached for
+    operator readability only; SageMaker does not treat it as a uniqueness
+    constraint.
     """
     resolved_config = config or load_config()
     detail = event.get("detail", event)
@@ -287,24 +316,26 @@ def eventbridge_trigger_handler(
         }
 
     display_name = _pipeline_execution_display_name(brand_id, pipeline_name)
-    try:
-        response = sagemaker.start_pipeline_execution(
-            PipelineName=pipeline_name,
-            PipelineParameters=_pipeline_parameters(brand_id, trigger, resolved_config),
-            PipelineExecutionDisplayName=display_name,
-        )
-    except TypeError:
-        # Test doubles / older clients that do not accept the idempotency
-        # kwarg still work; the display name is then best-effort only.
-        response = sagemaker.start_pipeline_execution(
-            PipelineName=pipeline_name,
-            PipelineParameters=_pipeline_parameters(brand_id, trigger, resolved_config),
-        )
+    client_request_token = _pipeline_client_request_token(brand_id, pipeline_name)
+    # ``ClientRequestToken`` is the SageMaker-documented idempotency control:
+    # two starts for the same pipeline sharing a token collide server-side,
+    # so repeated triggers inside the throttle window cannot launch duplicate
+    # executions. The display name is attached for operator readability only.
+    # Any ``TypeError`` from an older client intentionally propagates -- we do
+    # not silently retry without the idempotency token, because that would
+    # restore the exact failure mode this guard exists to prevent.
+    response = sagemaker.start_pipeline_execution(
+        PipelineName=pipeline_name,
+        PipelineParameters=_pipeline_parameters(brand_id, trigger, resolved_config),
+        PipelineExecutionDisplayName=display_name,
+        ClientRequestToken=client_request_token,
+    )
     return {
         "brand_id": brand_id,
         "pipeline_execution_arn": response["PipelineExecutionArn"],
         "trigger": trigger,
         "pipeline_execution_display_name": display_name,
+        "client_request_token": client_request_token,
     }
 
 
