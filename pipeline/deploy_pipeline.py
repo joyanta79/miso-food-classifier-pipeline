@@ -339,6 +339,11 @@ def build(
             "BRAND_ID": brand_id,
             "EPOCHS": str(config["training"]["epochs"]),
             "BATCH_SIZE": str(config["training"]["batch_size"]),
+            # Propagate the configured class names so train_step's manifest
+            # label validator (CWE-22 defence) uses the same allowlist as
+            # the evaluation step rather than the hard-coded defaults.
+            "DONE_LABEL": str(config["evaluation"].get("done_label", "done")),
+            "NOT_DONE_LABEL": str(config["evaluation"].get("not_done_label", "not_done")),
         },
     )
     train_step = TrainingStep(
