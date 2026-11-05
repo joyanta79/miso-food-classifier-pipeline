@@ -59,7 +59,60 @@ def load_config(config_path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]
     if not config["brands"]:
         raise ValueError("config.yaml must define at least one brand")
     _validate_drift_config(config["drift"])
+    _validate_data_selection_config(config["data_selection"])
+    _validate_evaluation_config(config["evaluation"])
     return config
+
+
+def _require_positive_int(section: str, mapping: Mapping[str, Any], key: str) -> int:
+    """Return ``mapping[key]`` as a positive integer or raise ``ValueError``.
+
+    The dataset/sample-count floors are safety-critical thresholds that are
+    baked into gate RightValues. A missing key, non-numeric value, or value
+    less than 1 would silently defeat the gate, so refuse the config up front
+    rather than fail-opening at the gate.
+    """
+    if key not in mapping:
+        raise ValueError(f"config.yaml {section} section missing {key!r}")
+    try:
+        value = int(mapping[key])
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"{section}.{key} must be an integer, got {mapping[key]!r}"
+        ) from error
+    if value < 1:
+        raise ValueError(
+            f"{section}.{key} must be >= 1, got {value!r}"
+        )
+    return value
+
+
+def _validate_data_selection_config(data_selection: Mapping[str, Any]) -> None:
+    """Require the dataset-count floors that feed DatasetBoundsGate / CleanlabQualityGate.
+
+    These values become the literal RightValues of safety gates; a missing or
+    non-positive value would silently relax the gate, so validate them at
+    config-load time rather than at gate-build time.
+    """
+    minimum = _require_positive_int("data_selection", data_selection, "target_dataset_min")
+    maximum = _require_positive_int("data_selection", data_selection, "target_dataset_max")
+    _require_positive_int("data_selection", data_selection, "min_images_per_class")
+    if maximum < minimum:
+        raise ValueError(
+            "data_selection.target_dataset_max must be >= data_selection.target_dataset_min"
+        )
+
+
+def _validate_evaluation_config(evaluation: Mapping[str, Any]) -> None:
+    """Require the sample-count floors that feed EvaluateModelQualityGate.
+
+    The gate's sample_count / done_sample_count / not_done_sample_count
+    thresholds are read from these keys; a missing key previously fell through
+    to ``.get(..., 1)``, silently reducing the floor to 1 sample. Fail closed
+    instead so that a definition built from an incomplete overlay is rejected.
+    """
+    _require_positive_int("evaluation", evaluation, "min_sample_count")
+    _require_positive_int("evaluation", evaluation, "min_per_class_count")
 
 
 def _validate_drift_config(drift: Mapping[str, Any]) -> None:
@@ -699,10 +752,10 @@ def build_dry_run_definition(
                 config["evaluation"].get("not_done_label", "not_done")
             ),
             "MIN_SAMPLE_COUNT": _literal_env_value(
-                int(config["evaluation"].get("min_sample_count", 1))
+                int(config["evaluation"]["min_sample_count"])
             ),
             "MIN_PER_CLASS_COUNT": _literal_env_value(
-                int(config["evaluation"].get("min_per_class_count", 1))
+                int(config["evaluation"]["min_per_class_count"])
             ),
         },
         [
@@ -814,21 +867,21 @@ def build_dry_run_definition(
                     "LeftValue": _step_ref(
                         "EvaluateModel", "EvaluationMetrics", "sample_count"
                     ),
-                    "RightValue": int(config["evaluation"].get("min_sample_count", 1)),
+                    "RightValue": int(config["evaluation"]["min_sample_count"]),
                 },
                 {
                     "Type": "ConditionGreaterThanOrEqualTo",
                     "LeftValue": _step_ref(
                         "EvaluateModel", "EvaluationMetrics", "not_done_sample_count"
                     ),
-                    "RightValue": int(config["evaluation"].get("min_per_class_count", 1)),
+                    "RightValue": int(config["evaluation"]["min_per_class_count"]),
                 },
                 {
                     "Type": "ConditionGreaterThanOrEqualTo",
                     "LeftValue": _step_ref(
                         "EvaluateModel", "EvaluationMetrics", "done_sample_count"
                     ),
-                    "RightValue": int(config["evaluation"].get("min_per_class_count", 1)),
+                    "RightValue": int(config["evaluation"]["min_per_class_count"]),
                 },
                 {
                     "Type": "ConditionLessThanOrEqualTo",
@@ -1183,12 +1236,52 @@ _GATE_RIGHT_VALUE_POLICY: dict[tuple[str, str, str], tuple[float, float]] = {
         "ConditionLessThanOrEqualTo",
     ): (0.0, 0.10),
     ("EvaluateModelQualityGate", "latency_ms", "ConditionLessThanOrEqualTo"): (1.0, 5_000.0),
+    # Evaluation sample-count floors: a per-class or total sample floor below the
+    # production value (100 total, 50 per class) renders accuracy and
+    # emergency_false_positive_rate statistically meaningless, so the policy
+    # requires at-least-the-production floor as a lower bound.
+    ("EvaluateModelQualityGate", "sample_count", "ConditionGreaterThanOrEqualTo"): (
+        100.0,
+        1_000_000.0,
+    ),
+    (
+        "EvaluateModelQualityGate",
+        "done_sample_count",
+        "ConditionGreaterThanOrEqualTo",
+    ): (50.0, 1_000_000.0),
+    (
+        "EvaluateModelQualityGate",
+        "not_done_sample_count",
+        "ConditionGreaterThanOrEqualTo",
+    ): (50.0, 1_000_000.0),
+    # missing_images must be exactly zero: a non-zero floor would admit silent
+    # data loss. Range is inclusive on both ends.
+    ("EvaluateModelQualityGate", "missing_images", "ConditionLessThanOrEqualTo"): (0.0, 0.0),
     ("DriftGate", "confidence", "ConditionGreaterThanOrEqualTo"): (0.50, 1.0),
     ("DriftGate", "correction_rate_multiplier", "ConditionLessThanOrEqualTo"): (1.0, 10.0),
     ("CleanlabQualityGate", "flagged_fraction", "ConditionLessThanOrEqualTo"): (0.0, 0.10),
-    ("DatasetBoundsGate", "dataset_size:min", "ConditionGreaterThanOrEqualTo"): (1.0, 1_000_000.0),
+    # Cleanlab's cleaned_count and minimum_class_count derive from the same
+    # data_selection floors as DatasetBoundsGate; the policy mirrors the
+    # production floors (6000 images total, 500 per class) rather than 1.
+    (
+        "CleanlabQualityGate",
+        "cleaned_count",
+        "ConditionGreaterThanOrEqualTo",
+    ): (6_000.0, 1_000_000.0),
+    (
+        "CleanlabQualityGate",
+        "minimum_class_count",
+        "ConditionGreaterThanOrEqualTo",
+    ): (500.0, 100_000.0),
+    ("DatasetBoundsGate", "dataset_size:min", "ConditionGreaterThanOrEqualTo"): (
+        6_000.0,
+        1_000_000.0,
+    ),
     ("DatasetBoundsGate", "dataset_size:max", "ConditionLessThanOrEqualTo"): (1.0, 10_000_000.0),
-    ("DatasetBoundsGate", "minimum_class_count", "ConditionGreaterThanOrEqualTo"): (1.0, 100_000.0),
+    ("DatasetBoundsGate", "minimum_class_count", "ConditionGreaterThanOrEqualTo"): (
+        500.0,
+        100_000.0,
+    ),
 }
 
 
@@ -1251,9 +1344,16 @@ def _validate_gate_right_values(definition: Mapping[str, Any]) -> None:
             key = (step_name, lookup_path, condition_type)
             policy = _GATE_RIGHT_VALUE_POLICY.get(key)
             if policy is None:
-                # No policy declared for this gate/path/comparator -- leave the literal
-                # check in place but do not range-enforce.
-                continue
+                # Fail closed: a numeric gate condition without a policy entry is a
+                # new gate that was not reviewed by the backstop. Rejecting it here
+                # prevents a future unpoliced condition from silently relaxing the
+                # release gates (the previous ``continue`` was itself the defect
+                # that let the sample / dataset floors escape policy review).
+                raise ValueError(
+                    f"Gate {step_name!r} condition {condition_type!r} for "
+                    f"{json_path!r} has no entry in _GATE_RIGHT_VALUE_POLICY; "
+                    "add a policy range before shipping this gate."
+                )
             low, high = policy
             if not (low <= float(right_value) <= high):
                 raise ValueError(
@@ -1492,7 +1592,7 @@ def build_sagemaker_pipeline(
                     property_file=evaluation_report,
                     json_path="sample_count",
                 ),
-                right=int(evaluation.get("min_sample_count", 1)),
+                right=int(evaluation["min_sample_count"]),
             ),
             ConditionGreaterThanOrEqualTo(
                 left=JsonGet(
@@ -1500,7 +1600,7 @@ def build_sagemaker_pipeline(
                     property_file=evaluation_report,
                     json_path="not_done_sample_count",
                 ),
-                right=int(evaluation.get("min_per_class_count", 1)),
+                right=int(evaluation["min_per_class_count"]),
             ),
             ConditionGreaterThanOrEqualTo(
                 left=JsonGet(
@@ -1508,7 +1608,7 @@ def build_sagemaker_pipeline(
                     property_file=evaluation_report,
                     json_path="done_sample_count",
                 ),
-                right=int(evaluation.get("min_per_class_count", 1)),
+                right=int(evaluation["min_per_class_count"]),
             ),
             ConditionLessThanOrEqualTo(
                 left=JsonGet(
