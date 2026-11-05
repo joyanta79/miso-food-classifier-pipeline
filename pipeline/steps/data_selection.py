@@ -38,7 +38,7 @@ import json
 import os
 import sys
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -90,9 +90,11 @@ def select(
     naming_pattern: str,
     *,
     brand_id: str = "",
+    recency_months: int,
     min_images_per_class: int,
     target_dataset_min: int,
     target_dataset_max: int,
+    now: datetime | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Build the curated manifest and selection metrics for one brand.
 
@@ -103,6 +105,12 @@ def select(
     ``brand_id`` is accepted for logging/metadata but is not used as the
     attribution key, because the configured ``brand.id`` (e.g. ``white-castle``)
     does not have to equal the filename brand token (``wc``).
+
+    ``recency_months`` is required and enforces the documented age window:
+    files whose modification time is older than ``now - recency_months * 30
+    days`` are skipped. This mirrors the sibling primitive
+    ``processing/step0_data_selection.py`` and uses a fixed 30-day month so
+    local and Processing-job selection stay deterministic.
     """
     if not naming_pattern:
         raise ValueError(
@@ -117,6 +125,21 @@ def select(
             f"{naming_pattern!r}. Refusing to run so cross-brand data cannot "
             "be mixed into this brand's dataset."
         )
+    if not isinstance(recency_months, int) or isinstance(recency_months, bool):
+        raise ValueError(
+            "RECENCY_MONTHS must be a positive integer; refusing to run so "
+            "the documented recency control cannot be silently disabled."
+        )
+    if recency_months < 1:
+        raise ValueError(
+            "RECENCY_MONTHS must be >= 1; refusing to run so the documented "
+            "recency control cannot be silently disabled."
+        )
+
+    reference_time = (now or datetime.now(UTC)).astimezone(UTC)
+    # Fixed 30-day month matches processing/step0_data_selection.py so local
+    # and Processing-job selection remain deterministic.
+    cutoff = reference_time - timedelta(days=recency_months * 30)
 
     manifest: list[dict[str, Any]] = []
     label_counts: Counter[str] = Counter()
@@ -135,6 +158,17 @@ def select(
         # another brand's convention can poison this brand's dataset.
         if brand != expected_brand:
             continue
+        # Enforce the recency window: skip files older than the cutoff. The
+        # real file timestamp is also recorded on the manifest so downstream
+        # auditors can verify the age distribution.
+        try:
+            modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+        except OSError:
+            # Unreadable stat -> cannot attribute age; skip rather than
+            # admit the record with a fabricated timestamp.
+            continue
+        if modified < cutoff:
+            continue
         # Record the path relative to ``image_root`` as a POSIX string so that
         # discovery (``rglob``) and resolution (``images_root / image_path``)
         # use the same namespace. ``id`` and ``key`` are set to the same
@@ -152,7 +186,7 @@ def select(
                 "image_path": rel_path,
                 "label": label,
                 "confidence": confidence,
-                "last_modified": datetime.now(UTC).isoformat(),
+                "last_modified": modified.isoformat(),
             }
         )
     dataset_size = len(manifest)
@@ -201,10 +235,34 @@ def main() -> None:
     target_dataset_min = int(os.environ.get("TARGET_DATASET_MIN", "40"))
     target_dataset_max = int(os.environ.get("TARGET_DATASET_MAX", "50000"))
 
+    # Fail-closed on the recency window: a missing or non-numeric value must
+    # not silently disable the documented six-month age filter. Match the
+    # pipeline parameter wiring in pipeline/pipeline.py (RecencyMonths).
+    recency_raw = os.environ.get("RECENCY_MONTHS", "").strip()
+    try:
+        recency_months = int(recency_raw)
+    except (TypeError, ValueError):
+        print(
+            "[data_selection] FATAL: RECENCY_MONTHS env var "
+            f"{recency_raw!r} is missing or not an integer; refusing to run "
+            "so the documented recency control cannot be silently disabled.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if recency_months < 1:
+        print(
+            "[data_selection] FATAL: RECENCY_MONTHS must be >= 1, got "
+            f"{recency_months}; refusing to run so the documented recency "
+            "control cannot be silently disabled.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
     manifest, metrics = select(
         Path(args.images),
         naming_pattern,
         brand_id=brand_id,
+        recency_months=recency_months,
         min_images_per_class=min_images_per_class,
         target_dataset_min=target_dataset_min,
         target_dataset_max=target_dataset_max,
