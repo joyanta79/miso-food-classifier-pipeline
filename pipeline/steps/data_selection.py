@@ -36,6 +36,7 @@ import argparse
 import fnmatch
 import json
 import os
+import re
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -46,21 +47,31 @@ UTC = timezone.utc
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 _WILDCARD_CHARS = frozenset("*?[")
 
+# Strict ``<brand>_<label>_<confidence>`` schema shared with
+# ``processing/step0_data_selection.py``. The brand token forbids ``_`` so the
+# parse is unambiguous, the label preserves underscores (e.g. ``not_done``),
+# and the confidence must be a non-negative decimal number. Filenames that do
+# not match -- for example ``wc_done_0.9_old`` (non-numeric confidence) or
+# ``wc_junk_abc`` -- are rejected rather than counted into
+# ``minimum_class_count``.
+_METADATA_PATTERN = re.compile(
+    r"^(?P<brand>[^_]+)_(?P<label>.+)_(?P<confidence>\d+(?:\.\d+)?)$"
+)
+
 
 def _parse_name(path: Path) -> tuple[str, str, str] | None:
     """Return ``(brand, label, confidence)`` from ``brand_label_confidence.ext``.
 
-    Returns ``None`` when the filename does not match the expected scheme.
+    Returns ``None`` when the filename does not match the strict schema. In
+    particular, the confidence suffix MUST be a numeric literal; names such as
+    ``wc_done_0.9_old`` are refused so that an uploader cannot invent a new
+    label by adding an extra underscore-separated suffix.
     """
     stem = path.stem
-    parts = stem.split("_")
-    if len(parts) < 3:
+    match = _METADATA_PATTERN.match(stem)
+    if not match:
         return None
-    # brand = parts[0]; confidence = parts[-1]; label = everything between.
-    brand = parts[0]
-    label = "".join(parts[1:-1])
-    confidence = parts[-1]
-    return brand, label, confidence
+    return match.group("brand"), match.group("label"), match.group("confidence")
 
 
 def _expected_brand_token(naming_pattern: str) -> str:
@@ -93,6 +104,7 @@ def select(
     min_images_per_class: int,
     target_dataset_min: int,
     target_dataset_max: int,
+    allowed_labels: tuple[str, ...] | list[str] | set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Build the curated manifest and selection metrics for one brand.
 
@@ -103,6 +115,15 @@ def select(
     ``brand_id`` is accepted for logging/metadata but is not used as the
     attribution key, because the configured ``brand.id`` (e.g. ``white-castle``)
     does not have to equal the filename brand token (``wc``).
+
+    ``allowed_labels`` is the operator-approved label policy (typically the
+    ``done_label`` / ``not_done_label`` from ``config.yaml``). Records whose
+    filename-derived label is not in this allowlist are rejected before being
+    counted. When ``allowed_labels`` is ``None`` the allowlist check is
+    skipped (used by unit tests only; production callers always pass one).
+    Rejected filenames do not contribute to ``minimum_class_count``; their
+    count is reported under ``metrics['rejected_filenames']`` so operators
+    can see when uploads are being discarded.
     """
     if not naming_pattern:
         raise ValueError(
@@ -118,8 +139,26 @@ def select(
             "be mixed into this brand's dataset."
         )
 
+    allowed_label_set: set[str] | None
+    if allowed_labels is None:
+        allowed_label_set = None
+    else:
+        allowed_label_set = {label for label in allowed_labels if label}
+        if not allowed_label_set:
+            raise ValueError(
+                "allowed_labels was provided but is empty after filtering; "
+                "refusing to run so an attacker-chosen label cannot define "
+                "the training label space."
+            )
+
     manifest: list[dict[str, Any]] = []
     label_counts: Counter[str] = Counter()
+    # Counters of filenames rejected *after* the brand glob matched. These
+    # feed the operator-visible ``metrics['rejected_filenames']`` so a sudden
+    # jump signals bad uploads.
+    rejected_malformed = 0  # filename does not match <brand>_<label>_<conf>
+    rejected_brand_mismatch = 0  # parsed brand token != pinned brand
+    rejected_label_not_allowed = 0  # label not in operator allowlist
     for path in sorted(image_root.rglob("*")):
         if path.suffix.lower() not in _IMAGE_SUFFIXES:
             continue
@@ -127,6 +166,10 @@ def select(
             continue
         parsed = _parse_name(path)
         if parsed is None:
+            # Does not match <brand>_<label>_<numeric-confidence>: e.g.
+            # ``wc_done_0.9_old`` (extra underscore / non-numeric confidence)
+            # or ``wc_junk_abc``. Reject rather than invent a label.
+            rejected_malformed += 1
             continue
         brand, label, confidence = parsed
         # The parsed brand token comes from an attacker-controlled filename.
@@ -134,6 +177,13 @@ def select(
         # configured naming pattern -- otherwise an uploader who guesses
         # another brand's convention can poison this brand's dataset.
         if brand != expected_brand:
+            rejected_brand_mismatch += 1
+            continue
+        # Reject labels outside the operator-configured allowlist so an
+        # uploader cannot introduce new classes (``junk``, etc.) into the
+        # binary food-safety classifier.
+        if allowed_label_set is not None and label not in allowed_label_set:
+            rejected_label_not_allowed += 1
             continue
         # Record the path relative to ``image_root`` as a POSIX string so that
         # discovery (``rglob``) and resolution (``images_root / image_path``)
@@ -155,15 +205,48 @@ def select(
                 "last_modified": datetime.now(UTC).isoformat(),
             }
         )
+
+    # Per-class eligibility filter (mirrors ``processing/step0_data_selection``):
+    # labels below ``min_images_per_class`` are dropped from both the manifest
+    # and the published ``minimum_class_count`` so a single stray upload
+    # cannot collapse the gate metric and wedge the brand's pipeline.
+    eligible_labels = {
+        label
+        for label, count in label_counts.items()
+        if count >= min_images_per_class
+    }
+    rejected_below_min_class = sum(
+        count for label, count in label_counts.items() if label not in eligible_labels
+    )
+    manifest = [item for item in manifest if item["label"] in eligible_labels]
+    eligible_counts = Counter(
+        {label: count for label, count in label_counts.items() if label in eligible_labels}
+    )
+
     dataset_size = len(manifest)
-    minimum_class_count = min(label_counts.values()) if label_counts else 0
+    minimum_class_count = (
+        min(eligible_counts.values()) if eligible_counts else 0
+    )
+    rejected_total = (
+        rejected_malformed
+        + rejected_brand_mismatch
+        + rejected_label_not_allowed
+        + rejected_below_min_class
+    )
     metrics = {
         "dataset_size": dataset_size,
         "minimum_class_count": minimum_class_count,
-        "class_distribution": dict(sorted(label_counts.items())),
+        "class_distribution": dict(sorted(eligible_counts.items())),
         "target_dataset_min": target_dataset_min,
         "target_dataset_max": target_dataset_max,
         "min_images_per_class": min_images_per_class,
+        "rejected_filenames": {
+            "total": rejected_total,
+            "malformed": rejected_malformed,
+            "brand_mismatch": rejected_brand_mismatch,
+            "label_not_allowed": rejected_label_not_allowed,
+            "below_min_images_per_class": rejected_below_min_class,
+        },
     }
     return manifest, metrics
 
@@ -201,6 +284,23 @@ def main() -> None:
     target_dataset_min = int(os.environ.get("TARGET_DATASET_MIN", "40"))
     target_dataset_max = int(os.environ.get("TARGET_DATASET_MAX", "50000"))
 
+    # Operator-configured label allowlist (``evaluation.done_label`` /
+    # ``evaluation.not_done_label`` from config.yaml). Pipeline wiring injects
+    # these as literal env vars so a per-execution PipelineParameters override
+    # cannot broaden the label space.
+    done_label = os.environ.get("DONE_LABEL", "done").strip()
+    not_done_label = os.environ.get("NOT_DONE_LABEL", "not_done").strip()
+    allowed_labels = tuple(
+        label for label in (done_label, not_done_label) if label
+    )
+    if not allowed_labels:
+        print(
+            "[data_selection] FATAL: DONE_LABEL / NOT_DONE_LABEL env vars are "
+            "empty; refusing to run without a label allowlist.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
     manifest, metrics = select(
         Path(args.images),
         naming_pattern,
@@ -208,6 +308,7 @@ def main() -> None:
         min_images_per_class=min_images_per_class,
         target_dataset_min=target_dataset_min,
         target_dataset_max=target_dataset_max,
+        allowed_labels=allowed_labels,
     )
 
     dataset_out = Path(args.dataset_out)
@@ -224,7 +325,8 @@ def main() -> None:
     print(
         f"[data_selection] dataset_size={metrics['dataset_size']} "
         f"minimum_class_count={metrics['minimum_class_count']} "
-        f"distribution={metrics['class_distribution']}"
+        f"distribution={metrics['class_distribution']} "
+        f"rejected={metrics['rejected_filenames']}"
     )
 
 
