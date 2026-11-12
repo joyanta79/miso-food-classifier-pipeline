@@ -110,9 +110,36 @@ terraform init
 terraform plan
 terraform apply
 
-# Or build/upsert the pipeline via the SageMaker SDK
-python pipeline/deploy_pipeline.py --config config.yaml --upsert
+# Or build/upsert the pipeline via the SageMaker SDK. Run it as a module from
+# the repo root: `python pipeline/deploy_pipeline.py` fails because
+# pipeline/pipeline.py shadows the `pipeline` package.
+python -m pipeline.deploy_pipeline --config config.yaml \
+  --images-uri s3://<raw-archive-bucket>/<brand-id>/ --upsert
 ```
+
+### Step runtime dependencies
+
+The TensorFlow DLC lacks `xgboost` and `cleanlab`, which `KFoldCleanlabQuality`
+needs. `pipeline/steps/_bootstrap.py` only installs them from the hash-locked
+`requirements.lock` at the root of the code channel, and refuses to run pip
+unless an index is named. Configure this with the optional `bootstrap:` block:
+
+```yaml
+bootstrap:
+  pip_index_url: https://<private-mirror>/simple   # MISO_PIP_INDEX_URL
+  # or, preferred for production: bake deps into the image and set
+  # disable: true                                  # MISO_PIP_DISABLE_BOOTSTRAP=1
+```
+
+Leaving `bootstrap:` out keeps the fail-closed default: the step stops rather
+than installing anything.
+
+### Drift correction-rate source
+
+`DetectDrift` needs a JSON document with `observed_correction_rate` and
+`baseline_correction_rate` (operator corrections vs. historical baseline).
+Point `drift.correction_rate_source_uri` at it (an `s3://.../*.json` object).
+Without it the step fails closed and `DriftGate` blocks every execution.
 
 ## Continuous integration
 

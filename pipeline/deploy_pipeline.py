@@ -111,6 +111,65 @@ def _relaxed_fields(config: dict[str, Any]) -> list[str]:
     return weak
 
 
+_BOOTSTRAP_ENV_KEYS = {
+    "pip_index_url": "MISO_PIP_INDEX_URL",
+    "pip_no_index": "MISO_PIP_NO_INDEX",
+    "pip_find_links": "MISO_PIP_FIND_LINKS",
+    "pip_requirements_lock": "MISO_PIP_REQUIREMENTS_LOCK",
+    "disable": "MISO_PIP_DISABLE_BOOTSTRAP",
+}
+
+
+def _bootstrap_env(config: dict) -> dict[str, str]:
+    """Map the optional ``bootstrap:`` config block onto _bootstrap's env vars.
+
+    Only keys the operator sets are emitted, so an unconfigured deployment keeps
+    _bootstrap's fail-closed default (no runtime install without a named index).
+    """
+    section = config.get("bootstrap") or {}
+    unknown = set(section) - set(_BOOTSTRAP_ENV_KEYS)
+    if unknown:
+        raise ValueError(f"unknown bootstrap config keys: {sorted(unknown)}")
+    env = {}
+    for key, var in _BOOTSTRAP_ENV_KEYS.items():
+        value = section.get(key)
+        if value is None or value == "":
+            continue
+        env[var] = ("1" if value else "0") if isinstance(value, bool) else str(value)
+    return env
+
+
+_CORRECTION_RATE_DIR = "/opt/ml/processing/input/correction_rate"
+
+
+def _correction_rate_wiring(config: dict) -> tuple[dict[str, str], list[ProcessingInput]]:
+    """Return (env, inputs) that feed DetectDrift its correction-rate document.
+
+    ``drift.correction_rate_source_uri`` is optional. When it is absent nothing
+    is wired and DetectDrift fails closed by design, so DriftGate blocks every
+    execution until an operator supplies a real source.
+    """
+    uri = config["drift"].get("correction_rate_source_uri")
+    if not uri:
+        return {}, []
+    uri = str(uri)
+    file_name = uri.rsplit("/", 1)[-1]
+    if not uri.startswith("s3://") or not file_name.endswith(".json"):
+        raise ValueError(
+            "drift.correction_rate_source_uri must be an s3:// URI of a .json "
+            f"object, got {uri!r}"
+        )
+    env = {"CORRECTION_RATE_SOURCE": f"{_CORRECTION_RATE_DIR}/{file_name}"}
+    inputs = [
+        ProcessingInput(
+            source=uri,
+            destination=_CORRECTION_RATE_DIR,
+            input_name="in_correction_rate",
+        )
+    ]
+    return env, inputs
+
+
 def build(
     config: dict,
     code_prefix: str,
@@ -182,7 +241,7 @@ def build(
         name="SelectRecentBrandData",
         step_args=processor(
             {
-                "NAMING_PATTERN": brand["naming_pattern"],
+                "NAMING_PATTERN": brand.naming_pattern,
                 "MIN_IMAGES_PER_CLASS": str(sel["min_images_per_class"]),
                 "TARGET_DATASET_MIN": str(sel["target_dataset_min"]),
                 "TARGET_DATASET_MAX": str(sel["target_dataset_max"]),
@@ -253,6 +312,9 @@ def build(
                 ),
                 "TARGET_DATASET_MIN": str(sel["target_dataset_min"]),
                 "MIN_IMAGES_PER_CLASS": str(sel["min_images_per_class"]),
+                # Opt-in runtime install index for _bootstrap (hash-locked via
+                # requirements.lock). Absent => bootstrap refuses to install.
+                **_bootstrap_env(config),
             }
         ).run(
             code=str(STEPS_DIR / "kfold_cleanlab.py"),
@@ -286,20 +348,20 @@ def build(
     drift_metrics = PropertyFile(
         name="DriftMetrics", output_name="drift_metrics", path="metrics.json"
     )
+    # Optional operator correction-rate document (observed/baseline JSON). When
+    # absent, DetectDrift fails closed by design, so every execution is blocked
+    # at DriftGate until an operator supplies a real source.
+    drift_env = {
+        "CONFIDENCE_BASELINE": str(config["drift"]["confidence_baseline"]),
+        "LEVEL1_CONFIDENCE_FLOOR": str(config["drift"]["level1_confidence_floor"]),
+        "LEVEL2_CONFIDENCE_THRESHOLD": str(config["drift"]["level2_confidence_threshold"]),
+        "CORRECTION_RATE_MULTIPLIER": str(config["drift"]["correction_rate_multiplier"]),
+    }
+    correction_env, drift_extra_inputs = _correction_rate_wiring(config)
+    drift_env.update(correction_env)
     drift_step = ProcessingStep(
         name="DetectDrift",
-        step_args=processor(
-            {
-                "CONFIDENCE_BASELINE": str(config["drift"]["confidence_baseline"]),
-                "LEVEL1_CONFIDENCE_FLOOR": str(config["drift"]["level1_confidence_floor"]),
-                "LEVEL2_CONFIDENCE_THRESHOLD": str(
-                    config["drift"]["level2_confidence_threshold"]
-                ),
-                "CORRECTION_RATE_MULTIPLIER": str(
-                    config["drift"]["correction_rate_multiplier"]
-                ),
-            }
-        ).run(
+        step_args=processor(drift_env).run(
             code=str(STEPS_DIR / "drift_detection.py"),
             inputs=[
                 code_input,
@@ -313,6 +375,7 @@ def build(
                     destination="/opt/ml/processing/input/dataset",
                     input_name="in_dataset",
                 ),
+                *drift_extra_inputs,
             ],
             outputs=[
                 ProcessingOutput(

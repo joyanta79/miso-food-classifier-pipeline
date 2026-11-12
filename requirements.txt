@@ -1,5 +1,6 @@
 boto3==1.34.162
 sagemaker==2.224.3
+pytz==2024.2
 PyYAML==6.0.2
 numpy==1.26.4
 scikit-learn==1.4.2

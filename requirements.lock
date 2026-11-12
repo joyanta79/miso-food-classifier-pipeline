@@ -1,0 +1,28 @@
+# Hash-locked runtime install set for the SageMaker TensorFlow 2.14.1 DLC
+# (CPython 3.10, manylinux x86_64), consumed by pipeline/steps/_bootstrap.py
+# with `pip install --require-hashes --no-deps --only-binary=:all:`.
+#
+# Only packages ABSENT from the DLC are listed. numpy / scipy / scikit-learn /
+# joblib / threadpoolctl / pillow already ship in the image and are deliberately
+# NOT locked here so the runtime install never replaces TensorFlow's stack.
+#
+# Needed by: KFoldCleanlabQuality (xgboost, cleanlab and cleanlab's deps).
+# Hashes are the sha256 digests published on PyPI for each pinned wheel.
+xgboost==2.0.3 \
+    --hash=sha256:30bd5f789fad467fd49e04e5d19e04238b931682c3951a514da5c2410b3bf59c
+cleanlab==2.6.4 \
+    --hash=sha256:c909b96393ea7d6eb41616d878fffb750adcbd38e3479a20eddd65a0a0b2d4ee
+pandas==2.2.3 \
+    --hash=sha256:86976a1c5b25ae3f8ccae3a5306e443569ee3c3faf444dfd0f41cda24667ad57
+python-dateutil==2.9.0.post0 \
+    --hash=sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427
+pytz==2024.2 \
+    --hash=sha256:31c7c1817eb7fae7ca4b8c7ee50c72f93aa2dd863de768e1ef4245d426aa0725
+tzdata==2024.2 \
+    --hash=sha256:a48093786cdcde33cad18c2555e8532f34422074448fbc874186f0abd79565cd
+six==1.16.0 \
+    --hash=sha256:8abb2f1d86890a2dfb989f9a77cfcfd3e47c2a354b01111771326f8aa26e0254
+termcolor==2.4.0 \
+    --hash=sha256:9297c0df9c99445c2412e832e882a7884038a25617c60cea2ad69488d4040d63
+tqdm==4.66.5 \
+    --hash=sha256:90279a3770753eafc9194a0364852159802111925aa30eb3f9d85b0e805ac7cd
